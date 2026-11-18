@@ -1,0 +1,5 @@
+# herdr-app check / types 가 mod 폴더에 만드는 파일
+gpui-kit.d.ts
+jsconfig.json
+# mod 가 앱 폴더에 두는 사본
+.cache/
