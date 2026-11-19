@@ -4,7 +4,7 @@
 // Windows 머신 폴더 읽기(PowerShell 길)는 뺐다 — 옮기기가 sh 로만 돈다.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, appHome, home, notify, openOverlay, closeOverlay, shared, setShared, props as modProps } from "herdr";
+import { spaces, panes, focused, exec, hc, readTextFile, watchFolder, theme, window, appHome, home, notify, openOverlay, closeOverlay, shared, setShared, props as modProps } from "herdr";
 import { makeTransfer, oneAtATime } from "./transfer.js";
 import { Preview, ResizeFrame, openPreviewWindow } from "./preview.js";
 import { dedupeNested, replaceGroupLines } from "./tree.js";
@@ -12,6 +12,7 @@ import { FileMenu, AskDialog } from "./ask-view.js";
 import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
+import { candidates, mergeResolved, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT } from "./termfiles.js";
 import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
@@ -39,6 +40,17 @@ function location(prev) {
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
 }
+
+// «터미널에 나온 파일» 대상: 눌린 터미널의 주소 · 머신(on) · 폴더 · 상태. 이 mod 페인이 눌렸거나 터미널이 아니면 앞 값을 그대로 둔다. 입출력 없음(300 ms 틱에서 부른다).
+function termTarget(prev) {
+  const f = focused(), all = panes();
+  const pane = f?.pane ? all.find(p => p.pane === f.pane) : null;
+  if (pane?.mod === NAME || !f?.terminal) return prev ?? null;
+  const addr = f.terminal, info = all.find(p => p.terminal === addr), space = spaces().find(s => s.active);
+  // 머신은 location() 과 같은 규칙(terminalMachine). [주의] 로컬 터미널 안에서 `ssh` 로 들어간 서버의 파일은 이 규칙으로 알 수 없다 — 이름은 Mac 에서 푼다.
+  return { addr, on: terminalMachine(f, space, addr), cwd: info?.cwd || f.cwd || null, status: info?.status ?? null };
+}
+const TF_READ_MS = 5000, TF_LINES = 300, TF_TEXT = 64 * 1024, TF_DEBOUNCE = 800, TF_ROWS = 8;
 
 async function directory(path, on) {
   const script = 'n=0; for p in "$1"/* "$1"/.[!.]* "$1"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$1"';
@@ -73,6 +85,7 @@ export default class FilesPlus extends View {
     // 패널(레이아웃 전환 · 블록 제거 · 앱 종료): 동기로만 한다 — 호스트는 close 뒤 ~250 ms 에 task 를 끊고, 끊긴 약속은 영영 안 끝난다.
     this.closed = true;
     try { this.publish?.cancel(); } catch { /* 종료 중 */ }
+    try { this.tfTimer?.cancel(); } catch { /* 종료 중 */ }
     try { this.histPub?.cancel(); } catch { /* 종료 중 */ }
     LIVE.delete(this.owner);
     this.closePreview();
@@ -175,7 +188,106 @@ export default class FilesPlus extends View {
     cx.timer.every(60000, cx => this.reap(cx));
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
+    // «터미널에 나온 파일» 줄: 상태는 this.tf* (스캔 시점 = 틱에서 key 변화 · 새로고침 단추 · 패널 열림. 주기 스캔 없음)
+    this.tfList = []; this.tfCollapsed = false; this.tfBusy = false; this.tfAgain = false; this.tfT = null; this.tfKey = undefined; this.tfWho = ""; this.tfTimer = null;
     cx.timer.every(300, cx => this.inbox(cx));
+  }
+
+  // 틱마다 key(주소|머신|폴더|상태)만 비교한다(입출력 없음). 바뀌면 800 ms 뒤 한 번 스캔 — 그 사이 또 바뀌면 다시 800 ms. 처음(패널 열림)은 바로.
+  tfTick(cx) {
+    const t = termTarget(this.tfT);
+    this.tfT = t;
+    const key = t ? `${t.addr}|${t.on}|${t.cwd}|${t.status}` : "";
+    if (key === this.tfKey) return;
+    const first = this.tfKey === undefined, who = t ? `${t.addr}|${t.on}|${t.cwd}` : "";
+    if (who !== this.tfWho) this.tfSet([], cx);       // 다른 터미널·폴더의 목록을 새 스캔 전까지 보이지 않는다(상태만 바뀐 경우는 그대로 둔다)
+    this.tfWho = who; this.tfKey = key;
+    this.tfSchedule(cx, first ? 0 : TF_DEBOUNCE);
+  }
+
+  tfSchedule(cx, ms) {
+    try { this.tfTimer?.cancel(); } catch { /* 이미 끝남 */ }
+    this.tfTimer = cx.timer.after(ms, cx => this.tfScan(cx));
+  }
+
+  tfSet(list, cx) {
+    if (this.tfList.length === list.length && this.tfList.every((p, i) => p === list[i])) return;
+    this.tfList = list; cx.notify();
+  }
+
+  // 스캔: 터미널 글자(hc read) → 후보 → 그 머신에서 진짜 있는 파일(sh). 한 번에 하나(진행 중이면 끝난 뒤 한 번 더). 시작한 key 가 그대로일 때만 반영한다.
+  // 실패(hc 오류 · sh 오류 · 시간 초과)는 줄을 비우고 조용히 — 다음 스캔에서 다시.
+  tfScan(cx) {
+    if (this.closed) return;
+    if (this.tfBusy) { this.tfAgain = true; return; }
+    const t = this.tfT, key = this.tfKey;
+    if (!t?.cwd) { this.tfSet([], cx); return; }
+    this.tfBusy = true;
+    cx.spawn(async cx => {
+      let list = [];
+      try {
+        // [주의] hc 에는 timeout 옵션이 없다 → 5 s 안에 안 돌아오면 포기(늦은 결과는 무시) — 안 그러면 tfBusy 가 안 풀려 줄이 멎는다.
+        const r = await new Promise(resolve => {
+          let done = false;
+          const timer = cx.timer.after(TF_READ_MS, () => { if (!done) { done = true; resolve(null); } });
+          hc(["read", t.addr, "--lines", String(TF_LINES), "--json"]).then(
+            v => { if (!done) { done = true; try { timer.cancel(); } catch { /* 이미 끝남 */ } resolve(v); } },
+            () => { if (!done) { done = true; try { timer.cancel(); } catch { /* 이미 끝남 */ } resolve(null); } });
+        });
+        if (!r || r.code !== 0) throw new Error("hc read");
+        let text = JSON.parse(r.stdout)?.text;
+        if (typeof text !== "string") throw new Error("no text");
+        // [주의] 글자(UTF-16) 수로 자른다 — 바이트로는 최대 ~192 KiB. 터미널 글자는 믿을 수 없는 입력(이름은 위치 인자로만 sh 에 넘긴다).
+        if (text.length > TF_TEXT) text = text.slice(-TF_TEXT);
+        const cands = candidates(text);
+        if (cands.length) {
+          const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, t.cwd, ...cands], { on: t.on, timeout: 10000 });
+          if (e.code !== 0) throw new Error("resolve");
+          list = mergeResolved(e.stdout, null, { max: TF_ROWS });
+          // 2단계: 직접 못 푼 상대 이름만 find 한 번. 실패 · 시간 초과면 1단계 결과만 쓴다.
+          const names = unresolved(e.stdout);
+          if (names.length) {
+            try {
+              const f = await exec("sh", ["-c", SEARCH_SCRIPT, NAME, t.cwd, ...names], { on: t.on, timeout: 10000 });
+              if (f.code === 0) list = mergeResolved(e.stdout, f.stdout, { max: TF_ROWS });
+            } catch { /* 1단계 결과 유지 */ }
+          }
+        }
+      } catch { list = []; }
+      this.tfBusy = false;
+      if (!this.closed && this.tfKey === key) this.tfSet(list, cx);
+      if (this.tfAgain && !this.closed) { this.tfAgain = false; this.tfScan(cx); }
+    });
+  }
+
+  // 줄 클릭 → 미리보기(openPreview 와 같은 꼴 · 그 파일 하나). 터미널 출력만으로 저절로 열지 않는다.
+  openTermFile(abs) {
+    const i = abs.lastIndexOf("/"), name = abs.slice(i + 1), root = i > 0 ? abs.slice(0, i) : "/";
+    if (!safeName(name)) return;
+    this.previewDir = null;
+    this.previewId = openPreviewWindow({ mode: "preview", owner: this.owner, root, on: this.tfT?.on ?? null, space: this.context?.space, dir: "", files: [name], index: 0, mac: this.mac, viewer: this.viewer }, false);
+  }
+
+  // 머리줄 아래 칸: 터미널 대상이 있을 때(결과 0 이면 줄 없이 «· 0» 머리 + 새로고침만). 머리(접기 ▾/▸ · 개수 · 새로고침) + 줄(file 아이콘 · 이름 · 흐린 부모 폴더 이름).
+  termStrip(t) {
+    const list = this.tfList;
+    return v_flex().id("tf-strip").flex_none().border_b(1).border_color(t.border)
+      .child(h_flex().id("tf-head").h(30).px(10).gap(6).items_center()
+        .child(h_flex().id("tf-toggle").h(24).flex_1().min_w(0).gap(6).items_center().rounded(6).px(4).cursor_pointer().hover(s => s.bg(t.hover))
+          .on_click((_e, cx) => { this.tfCollapsed = !this.tfCollapsed; cx.notify(); })
+          .child(svg(icon(`chevron-${this.tfCollapsed || list.length === 0 ? "right" : "down"}`)).size(12).flex_none().text_color(t.dim))
+          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(`터미널에 나온 파일 · ${list.length}`)))
+        .child(h_flex().id("tf-refresh").w(24).h(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
+          .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("다시 찾기")
+          .on_click((_e, cx) => this.tfScan(cx)).child(svg(icon("history")).size(14).flex_none())))
+      .when(!this.tfCollapsed && list.length > 0, el => el.child(v_flex().id("tf-list").max_h(TF_ROWS * 28 + 8).overflow_y_scrollbar().px(6).pb(6).children(list.map((abs, i) => {
+        const parts = abs.split("/"), name = parts.pop(), dir = parts.pop() ?? "";
+        return h_flex().id(`tf-row-${i}`).h(28).flex_none().px(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
+          .on_click(() => this.openTermFile(abs))
+          .child(svg(icon("file")).size(14).flex_none().text_color(t.muted))
+          .child(div().flex_1().min_w(0).truncate().child(name))
+          .when(Boolean(dir), el => el.child(div().max_w(110).flex_none().truncate().text_size(11).text_color(t.dim).child(dir)));
+      }))));
   }
 
   // 등록부에 내 owner 와 지금 시각을 적는다(15 s 마다). 닫혔거나 낡은 삶이면 쓰지 않는다.
@@ -748,6 +860,7 @@ export default class FilesPlus extends View {
   // 팝업 요청함(300 ms). 모르는 action 은 무시한다.
   inbox(cx) {
     if (this.closed || !this.lifeOk()) return;    // 낡은 삶은 요청함도 비우지 않는다(ack 를 올려 새 삶의 요청을 가로채지 않게)
+    try { this.tfTick(cx); } catch { /* 터미널 줄 오류가 요청함을 막지 않게 */ }
     for (const from of SOURCES) {
       for (const req of drain(shared, setShared, this.owner, from)) {
         try { this.handle(req.action, req.args ?? {}, cx); } catch { /* 한 요청 오류가 나머지를 막지 않게 */ }
@@ -830,6 +943,7 @@ export default class FilesPlus extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("파일+"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(where)))
+      .when(Boolean(this.tfT), el => el.child(this.termStrip(t)))
       .child(v_flex().id("files-tree").on_mouse_down("right", () => this.openMenu(null)).flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error), el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error)))
         .when(empty, el => el.child(v_flex().p(8).gap(2)

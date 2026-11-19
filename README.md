@@ -13,7 +13,7 @@ Herdr 앱(Mac)과 herdr-core(`hc` · 원격 리눅스 상자)에서 Claude Code 
 | `agents/` | `agy-worker` · `grok-worker` · `opencode-worker-free` — Claude 의 Agent 도구로 그 CLI 에 짧은 일을 맡기는 껍데기 | 상자 `~/.claude/agents/`(깔린 CLI 것만) |
 | `statusline/` | Claude Code 아래 상태줄: Claude 줄 + (깔렸으면) Codex 줄 · agy 줄 — 모델 · 5시간/7일 한도 · 초기화까지 남은 시간 | 상자 `~/.claude/settings.json` `statusLine` |
 | `claude/CLAUDE.md` | 핵심 전역 규칙(팀워크 판정 · 도우미 다루기 · 작업 기본 규칙) | 상자 `~/.claude/CLAUDE.md` 의 표시선 블록 |
-| `mods/` | Mac 앱 mod **files-plus** — 원격 파일 미리보기 · 올리기 · 내려받기 | Mac `~/.config/herdr-app/mods/files-plus` |
+| `mods/` | Mac 앱 mod **files-plus** — 원격 파일 미리보기(PDF 쪽 넘기기는 Mac 앱만 · 격리 실행 아래에서 렌더) · 올리기 · 내려받기 · «터미널에 나온 파일» 줄 | Mac `~/.config/herdr-app/mods/files-plus` |
 | `manual/` | 세트가 쓰는 hc 명령 대조표(매뉴얼은 `hc --skill`) | — |
 | `docs/` | Mac 에서 herdr-open × files-plus 를 확인하는 순서 | — |
 

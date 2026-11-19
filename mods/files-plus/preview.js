@@ -7,6 +7,7 @@ import { exec, readTextFile, theme, settings, appHome, run, props, openOverlay, 
 import * as fs from "fs/promises";
 import { kindOf, pictureCheck, human, safeMarkdown, MD_RENDER_LIMIT } from "./kinds.js";
 import { makeTransfer, TooBig } from "./transfer.js";
+import { sandboxProfile, renderArgv, parsePdfOut, nextRender } from "./pdfpages.js";
 import { send, safeName, alive, own, previewSpec, previewKey, readShared, livePreviewId, previewId, KEY, dragRect, fontOf, stepFont, FONT_DEFAULT, resizeEntry, resizeEntryOf, resizeLive, RESIZE_SLACK, RESIZE_REFRESH_MS, resizeFrameId } from "./state.js";
 
 const NAME = "files-plus";
@@ -17,10 +18,14 @@ const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", 
 const icon = (n) => `mods/${NAME}/${n}.svg`;
 const ZOOMS = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];   // 확대 단계(자연 크기 대비)
 const NOTCH_PX = 40;                                            // 트랙패드 픽셀 누적 → 한 단계
+const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+const PDF_FAIL = "PDF 를 열 수 없다(잠김·손상) · 열기나 내려받기를 쓴다";
+const DOC_NOTE = "첫 쪽만 보임 · 전체는 Mac에서 열기";
+const NO_SANDBOX_NOTE = "첫 쪽만 보임 (쪽 넘기기 불가: 격리 실행 없음)";
 const HELP = [   // ? 패널: [키, 설명]
   ["→ · 스페이스", "다음 파일"], ["←", "이전 파일"], ["↑ ↓ · Home · End", "이전·다음 · 처음·끝 파일 (글 칸을 누르면 글 스크롤)"], ["Esc", "닫기"],
   ["Enter · ⌘O", "Mac에서 열기 (기본 앱이 터미널·설치기·실행기면 열지 않고 Finder 에서 보여 준다)"], ["⌘S", "내려받기"], ["⌘C", "경로 복사"], ["I · L", "정보 · 목록 칸"], ["P", "페이지로"], ["F", "크게 보기 ↔ 보통"],
-  ["+ · =", "확대"], ["-", "축소"], ["0", "맞춤"], ["1", "실제 크기(100%)"], ["끌기 · 휠", "그림 이동(커졌을 때)"], ["⌘/Ctrl + 휠", "커서 기준 확대·축소"], ["더블클릭", "맞춤 ↔ 100%"],
+  ["PageUp · PageDown", "PDF 쪽 넘기기"], ["+ · =", "확대"], ["-", "축소"], ["0", "맞춤"], ["1", "실제 크기(100%)"], ["끌기 · 휠", "그림 이동(커졌을 때)"], ["⌘/Ctrl + 휠", "커서 기준 확대·축소"], ["더블클릭", "맞춤 ↔ 100%"],
   ["+ · - · 0", "글자 크게 · 작게 · 기본 (글자 보기일 때 · 기억됨)"],
   ["오른쪽 · 아래 가장자리 · 모서리 끌기", "창 크기 조절(기억됨) · 모서리를 두 번 누르면 기본 크기"],
   ["M", "마크다운 렌더 ↔ 원문"], ["?", "이 도움말"],
@@ -64,6 +69,7 @@ export class Preview {
     this.tx = makeTransfer(exec, { quarantine: () => this.mac });   // 패널과 같은 격리: 사본을 mv -f 로 바꿔도 격리 속성이 남는다
     this.cacheDir = `${appHome()}/${CACHE_REL}`;
     this.gen = 0; this.closed = false;
+    this.flight = Promise.resolve(); this.homeReal = null;   // 쪽 렌더는 창당 하나씩(앞 파일 것이 끝나야 다음) · 홈 실제 경로 캐시
     this.box = { w: 0, h: 0 };
     // zoom: null = 맞춤 · 숫자 = 자연 크기 배율. props.zoom(숫자 | "fit")은 첫 파일에만 쓴다.
     const z = Number(this.p.zoom);
@@ -148,8 +154,10 @@ export class Preview {
     if (!safeName(this.files[i])) return;
     this.index = i;
     for (const k of Object.keys(this.downSeen)) this.downSeen[k] = false;
+    const startPage = this.first ? Number(this.p.page) : 0;   // 크게 보기·크기 조절로 다시 열었을 때 이어 볼 쪽(첫 파일만 · 범위 밖이면 0)
     this.zoom = this.first ? this.initZoom : null; this.first = false; this.wheel = 0;
     this.px = null; this.py = null; this.drag = null;
+    this.pdf = null; this.pdfJobs = new Map(); this.pw = 0;   // PDF 쪽 넘기기 상태 · 진행 중인 쪽 렌더 · 휠 누적
     this.md = /\.(md|markdown)$/i.test(this.files[i]); this.mdText = null;
     this.refocus(cx);   // 새 내용이 키보드를 받지 않는다 → 겉 요소로 되돌린다
     const gen = ++this.gen;
@@ -165,7 +173,7 @@ export class Preview {
       } catch { /* 줄 생략 */ }
       if (live()) cx.notify();
     });
-    if (kind === "image" || kind === "convert" || kind === "doc") this.picture(kind, name, abs, gen, cx);
+    if (kind === "image" || kind === "convert" || kind === "doc") this.picture(kind, name, abs, gen, cx, Number.isInteger(startPage) && startPage > 0 ? startPage : 0);
     else this.text(name, abs, gen, cx);
     cx.notify();
   }
@@ -194,7 +202,7 @@ export class Preview {
     });
   }
 
-  picture(kind, name, abs, gen, cx) {
+  picture(kind, name, abs, gen, cx, startPage = 0) {
     if (kind !== "image" && !this.mac) { this.media = { kind, state: "error", note: "문서·HEIC 미리보기는 Mac 앱에서만 된다(빠른 보기·sips) · 열기나 내려받기를 쓴다" }; return; }
     const live = () => !this.closed && this.gen === gen;
     const media = this.media = { kind, state: "loading", total: 0, done: 0 };
@@ -203,21 +211,170 @@ export class Preview {
       const job = { start: n => { media.total = n; }, progress: n => { media.done = n; if (live()) cx.notify(); }, get cancelled() { return !live(); } };
       try {
         const c = await this.tx.cached(this.on, abs, this.cacheDir, name, kind === "image" ? IMAGE_LIMIT : DOC_LIMIT, job);
-        const out = kind === "image" ? c.path : await this.convert(kind, c.path, c.sha);
-        const bytes = await fs.readFile(out).catch(() => null);
+        if (!live()) return;   // 다운로드 사이 다른 파일로 넘어갔다 → 낡은 파일이 새 세대 줄에 서지 않게
+        this.touch(c.sha);   // 캐시 정리(main.js · 폴더 mtime 기준)가 쓰는 중인 사본을 지우지 않게
+        let out = null, note = kind === "doc" ? DOC_NOTE : null, pdf = null;
+        // PDF(Mac 앱만): 한 쪽씩. 격리 렌더러 자체가 없을 때(sandbox-exec 없음 · 홈 모름 · 프로필 못 만듦 = null)만 기존 첫 쪽(qlmanage)으로 돌아간다.
+        // [주의] 격리 렌더가 «실패»(잠김 · 5000쪽 초과 · 시간 초과 · 거대한 쪽 · 깨짐)하면 오류 화면 — 믿을 수 없는 PDF 를 더 약한 샌드박스(qlmanage)로 두 번째 파싱하지 않는다(공격자가 실패를 유도해 약한 경로로 내릴 수 있다).
+        if (kind === "doc" && this.mac && /\.pdf$/i.test(name)) {
+          let r = null;
+          try {
+            r = await this.pdfPage(c.path, c.sha, startPage, 0, gen);
+            if (r && r.out === null) r = await this.pdfPage(c.path, c.sha, 0, 0, gen);   // 이어 볼 쪽이 범위 밖 → 1쪽
+          } catch {
+            if (!live()) return;
+            // 이어 볼 쪽(>0)만 못 그린 것일 수 있다 → 같은 격리 렌더러로 1쪽을 한 번 더(qlmanage 로 다시 파싱하지 않는다). 그것도 실패하면 오류 화면.
+            r = null;
+            if (startPage > 0) { try { r = await this.pdfPage(c.path, c.sha, 0, 0, gen); } catch { if (!live()) return; } }
+            if (!r) throw new Error(PDF_FAIL);
+          }
+          if (!live()) return;
+          if (r) {
+            if (!r.out) throw new Error(PDF_FAIL);
+            out = r.out; note = null; pdf = { src: c.path, sha: c.sha, pages: r.pages, page: r.page, want: null, busy: false, pre: new Set(), bytes: c.size };
+          } else note = NO_SANDBOX_NOTE;
+        }
+        out ??= kind === "image" ? c.path : await this.convert(kind, c.path, c.sha);
+        const v = await this.look(out);
         if (!live()) return;
-        // 픽셀 폭탄 · 크기 모름: imageSize ?? declaredSize(머리글의 선언 크기 — TIFF · ICO · PNM · SVG 포함)로 잰다. 모르면(null) 그리지 않는다 — 변환된 PNG(문서 · HEIC)도 같다.
-        // media.size 는 그리기용 imageSize 만(그리는 쪽은 그대로).
-        const { size, bomb, unknown } = pictureCheck(bytes);
-        if (unknown) { this.media = { kind, state: "error", note: "크기를 알 수 없는 그림이다 · 열기나 내려받기를 쓴다" }; return; }
-        if (bomb) { this.media = { kind, state: "error", note: `너무 큰 그림이다(${bomb.w >= 1e12 ? "?" : Math.round(bomb.w)}×${bomb.h >= 1e12 ? "?" : Math.round(bomb.h)}) · 열기나 내려받기를 쓴다` }; return; }
-        this.media = { kind, state: "ready", rel: out.slice(appHome().length + 1), size, bytes: c.size,
-          note: kind === "doc" ? "첫 쪽만 보임 · 전체는 Mac에서 열기" : null };
+        if (v.note) { this.media = { kind, state: "error", note: v.note }; return; }
+        this.pdf = pdf;
+        this.media = { kind, state: "ready", rel: out.slice(appHome().length + 1), size: v.size, bytes: c.size, note };
+        if (pdf) this.pump(pdf, gen, cx);
       } catch (e) {
         if (!live()) return;
         this.media = { kind, state: "error", note: e instanceof TooBig ? `미리보기 상한 ${human(e.limit)}보다 크다(${human(e.size)}) · 내려받기나 열기를 쓴다` : String(e?.message ?? e) };
       } finally { if (live()) cx.notify(); }
     });
+  }
+
+  // 그림 파일 검사: 픽셀 폭탄 · 크기 모름: imageSize ?? declaredSize(머리글의 선언 크기 — TIFF · ICO · PNM · SVG 포함)로 잰다. 모르면(null) 그리지 않는다 — 변환된 PNG(문서 · HEIC · PDF 쪽)도 같다.
+  // media.size 는 그리기용 imageSize 만(그리는 쪽은 그대로). 돌려주는 값: {size} 또는 {note}(그리지 않는 사유).
+  async look(out) {
+    const bytes = await fs.readFile(out).catch(() => null);
+    const { size, bomb, unknown } = pictureCheck(bytes);
+    if (unknown) return { note: "크기를 알 수 없는 그림이다 · 열기나 내려받기를 쓴다" };
+    if (bomb) return { note: `너무 큰 그림이다(${bomb.w >= 1e12 ? "?" : Math.round(bomb.w)}×${bomb.h >= 1e12 ? "?" : Math.round(bomb.h)}) · 열기나 내려받기를 쓴다` };
+    return { size };
+  }
+
+  // PDF 한 쪽(i, 0부터)을 PNG 로 — 캐시(${sha}/view/p${i}.png · 쪽 수 ${sha}/view/pages: sha 폴더가 이미 파일마다 따로라 원래 이름은 안 쓴다 → NAME_MAX 안전)가 비어 있지 않으면 그대로
+  // · 같은 쪽을 동시에 두 번 만들지 않는다 · 렌더는 창당 하나씩(this.flight 줄: 앞 파일의 낡은 렌더도 끝나야 다음이 시작 · 세대가 바뀐 줄 선 렌더는 시작하지 않는다).
+  // 돌려주는 값 {out, pages, page} · out null = 그 쪽이 범위 밖(pages 만 유효) · 반환 null = 격리 실행 불가 · 그 밖의 실패는 던진다.
+  // known = 이미 아는 쪽 수(0 이면 모름 → 첫 쪽은 pages 파일이 없을 때 다시 만들어 센다).
+  // gen = 부르는 쪽이 잡은 세대(호출 시점의 this.gen 을 쓰지 않는다 — await 뒤 낡은 호출이 새 세대로 줄 서는 것 방지).
+  pdfPage(src, sha, i, known, gen) {
+    const dir = `${this.cacheDir}/${sha}/view`, out = `${dir}/p${i}.png`;
+    const jobs = this.pdfJobs;
+    if (this.closed || this.gen !== gen) return Promise.reject(new Error("취소했다"));
+    if (jobs.has(out)) return jobs.get(out);
+    const run = () => { if (this.closed || this.gen !== gen) throw new Error("취소했다"); return this.pdfRender(src, sha, dir, out, i, known, gen); };
+    const job = this.flight.then(run).then(r => { if (r?.out) this.touch(sha); return r; }).finally(() => jobs.delete(out));
+    this.flight = job.catch(() => {});
+    jobs.set(out, job);
+    return job;
+  }
+  // 캐시 폴더 mtime 갱신 — main.js 가 mtime 이 낡은 ${cacheDir}/<sha> 를 지운다. 조용히 실패해도 된다(다음 열기에 다시).
+  touch(sha) { exec("touch", ["-c", `${this.cacheDir}/${sha}`]).catch(() => {}); }
+  // 홈 폴더 실제 경로(프로필의 deny subpath) — 한 번만 알아 두고 캐시. 못 알면 null(→ 격리 프로필을 못 만들어 PDF 를 열지 않는다).
+  async homeDir() {
+    if (this.homeReal) return this.homeReal;
+    const r = await exec("sh", ["-c", 'cd -P "$HOME" && pwd -P']).catch(() => null);
+    const h = r?.code === 0 ? r.stdout.trim() : "";
+    if (h.startsWith("/") && h !== "/") this.homeReal = h;
+    return this.homeReal;
+  }
+  async pdfRender(src, sha, dir, out, i, known, gen) {
+    const pf = `${dir}/pages`;
+    await exec("mkdir", ["-p", dir]);
+    const hit = await exec("sh", ["-c", '[ -s "$1" ] || exit 1; cat "$2" 2>/dev/null; exit 0', "sh", out, pf]);
+    if (hit.code === 0) { const n = Number(hit.stdout.trim()); if (n >= 1) return { out, pages: n, page: i }; if (known >= 1) return { out, pages: known, page: i }; }
+    if ((await exec("test", ["-x", SANDBOX_EXEC])).code !== 0) return null;
+    // 임시 폴더: 캐시 폴더의 실제 경로(pwd -P) 아래 — 프로필의 subpath 는 실제 경로여야 맞는다. 쓰기는 이 폴더 안으로만 허용된다.
+    // 읽기 허용 폴더 = ${cacheDir}/${sha} 의 실제 경로: 원본 PDF(그 안)와 임시 폴더(view 아래)를 모두 품는다. view 가 밖으로 새는 링크면(임시 폴더가 그 아래가 아니면) 실패.
+    const mk = await exec("sh", ["-c", 'd=$(cd -P "$1" && pwd -P) && r=$(cd -P "$2" && pwd -P) && case "$d" in "$r"/*) ;; *) exit 1;; esac && t=$(mktemp -d "$d/.tmp.XXXXXX") && printf "%s\n%s" "$t" "$r"', "sh", dir, `${this.cacheDir}/${sha}`]);
+    const [tmp = "", readDir = ""] = mk.code === 0 ? mk.stdout.split("\n") : [];
+    const home = tmp ? await this.homeDir() : null;
+    const prof = home ? sandboxProfile(tmp, { home, read: readDir }) : null;
+    // 프로필을 못 만들면(이상한 경로 · 홈 모름) 격리 없이 돌리지 않는다. tmp 가 만들어졌으면 치운다.
+    if (!prof) { if (tmp) await exec("rm", ["-rf", tmp]).catch(() => {}); return null; }
+    try {
+      // [경고] 믿을 수 없는 PDF 를 PDFKit 로 연다 — 네트워크 거부 · tmp 밖 쓰기 거부 · 홈 읽기 거부(캐시 폴더만 허용) · fork/exec/LaunchServices 거부 프로필 아래에서만 실행. 샌드박스 없이 osascript 로 PDF 를 열지 말 것.
+      // [주의] 외부 프로세스 — 60 s 타임아웃(큰 PDF · 멈춘 PDFKit). 타임아웃이면 실패로 본다.
+      if (this.closed || this.gen !== gen) throw new Error("취소했다");   // 준비하는 사이 다른 파일로 넘어갔으면 60 s 짜리 렌더를 시작하지 않는다
+      // [경고] 원본은 실제 경로(readDir)로 넘긴다 — 홈 읽기 거부 프로필은 홈 안의 심볼릭 링크(stow 식 dotfiles)를 지나는 경로 조회도 막아 논리 경로면 «pdf open failed».
+      const r = await exec(SANDBOX_EXEC, renderArgv(prof, readDir, src.split("/").pop(), tmp, i), { timeout: 60000 });
+      const o = r.code === 0 ? parsePdfOut(r.stdout) : null;
+      if (!o) throw new Error(PDF_FAIL);
+      if (o.w === 0 && o.h === 0) return { out: null, pages: o.pages, page: i };   // 범위 밖(그림 없음)
+      if (o.w < 1 || o.h < 1) throw new Error(PDF_FAIL);
+      const mv = await exec("sh", ["-c", '[ -s "$1/o.png" ] && mv -f "$1/o.png" "$2" && printf %s "$3" > "$1/pages" && mv -f "$1/pages" "$4"', "sh", tmp, out, String(o.pages), pf]);
+      if (mv.code !== 0) throw new Error(PDF_FAIL);
+      return { out, pages: o.pages, page: i };
+    } finally { await exec("rm", ["-rf", tmp]).catch(() => {}); }
+  }
+  pdfPaged() { return Boolean(this.pdf && this.pdf.pages > 1); }
+  // 쪽 렌더 펌프(창당 하나만 돈다): 한 번에 한 쪽 — 원하는 쪽(want)이 있으면 그 쪽(중간 쪽은 건너뜀), 한가하면 다음 쪽 미리 만들기. 끝나면 스스로 다시 부른다.
+  // 앞 파일의 결과는 gen · this.pdf 비교로 버린다.
+  pump(p, gen, cx, fired = false) {
+    if (this.closed || this.gen !== gen || this.pdf !== p) return;
+    if (!fired) p.tok = (p.tok ?? 0) + 1;   // 활동 번호 — 쪽 넘김 · 렌더 끝마다 오른다(미리 만들기 타이머가 «그 뒤 400 ms 조용했나» 를 보는 데 쓴다)
+    const step = nextRender(p, this.media?.state === "ready");
+    if (!step) return;
+    // [주의] 미리 만들기는 취소할 수 없다(exec 에 kill 없음 · 최대 60 s) → 마지막 활동 뒤 400 ms 조용할 때만 시작한다(디바운스): 타이머가 도는 사이 활동 번호가 바뀌었으면 다시 400 ms 기다린다. 깨어나면 gen · want 를 다시 본다.
+    if (!step.show && !fired) {
+      if (!p.timer) {
+        p.timer = true;
+        const arm = c0 => {
+          const t0 = p.tok;
+          this.later(c0, 400, c => {
+            if (this.closed || this.gen !== gen || this.pdf !== p) { p.timer = false; return; }
+            if (p.tok !== t0) { arm(c); return; }
+            p.timer = false; this.pump(p, gen, c, true);
+          });
+        };
+        arm(cx);
+      }
+      return;
+    }
+    const { to, show } = step, kind = this.media?.kind ?? "doc";
+    const live = () => !this.closed && this.gen === gen && this.pdf === p;
+    p.busy = true;
+    if (!show) p.pre.add(to);
+    cx.spawn(async cx => {
+      let media = null;
+      try {
+        const r = await this.pdfPage(p.src, p.sha, to, p.pages, gen);
+        if (show && live() && p.want === to) {
+          if (!r?.out) throw new Error(PDF_FAIL);
+          const v = await this.look(r.out);
+          media = v.note ? { kind, state: "error", note: v.note }
+            : { kind, state: "ready", rel: r.out.slice(appHome().length + 1), size: v.size, bytes: p.bytes, note: null };
+        }
+      } catch { if (show && live() && p.want === to) media = { kind, state: "error", note: `${to + 1}쪽을 그릴 수 없다 · 다른 쪽으로 넘겨 본다` }; }
+      finally {
+        p.busy = false;
+        if (live()) {
+          if (media && p.want === to) {   // 그 사이 다른 쪽을 원하게 됐으면(want 변경) 이 결과는 버린다 → 아래 pump 가 새 쪽을 만든다
+            if (media.state === "ready") p.page = to;   // 실패한 쪽은 «보던 쪽» 으로 남기지 않는다 → 다시 열기(reopenProps)가 좋은 쪽을 잇는다
+            p.want = null;
+            this.media = media; this.zoom = null; this.px = null; this.py = null; this.drag = null; this.wheel = 0; this.pw = 0;
+          }
+          cx.notify();
+          this.pump(p, gen, cx);
+        }
+      }
+    });
+  }
+  // PDF 쪽 넘기기(d = ±1): 목표 쪽은 연달아 눌러도 쌓이지만(want) 렌더는 하나씩 — 중간 쪽은 건너뛴다. 지금 쪽으로 돌아오면 want 는 비운다.
+  turn(d, cx) {
+    const p = this.pdf;
+    if (!p || p.pages < 2) return;
+    const cur = p.want ?? p.page, to = Math.min(p.pages - 1, Math.max(0, cur + d));
+    if (to === cur) return;
+    p.want = to === p.page ? null : to;
+    cx.notify();
+    this.pump(p, this.gen, cx);
   }
 
   // macOS 에서만: HEIC 등은 sips 로 PNG, 문서는 빠른 보기(qlmanage -t)로 첫 쪽 PNG.
@@ -263,12 +420,13 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
   }
 
   // 아이콘 줄 단추: 눌러도 뒤로 번지지 않는다.
-  tool(id, file, label, t, onClick, on = false) {
+  tool(id, file, label, t, onClick, on = false, off = false) {
     return h_flex().id(id).w(32).h(32).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
       .bg(on ? t.selected : "#00000000").text_color(on ? t.accent : t.dim)
       .hover(s => s.bg(t.hover).text_color(on ? t.accent : t.foreground))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((e, cx) => { cx.stop_propagation(); onClick(e, cx); })
+      .when(off, el => el.opacity(0.35))
       .tooltip(label)
       .child(svg(icon(file)).size(18).flex_none());
   }
@@ -293,6 +451,7 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
     const p = { ...this.p }; delete p.overlay; delete p.rect;
     const rawFiles = Array.isArray(this.p.files) ? this.p.files : [];
     return { ...p, files: rawFiles, index: Math.max(0, rawFiles.indexOf(this.name)), full,
+      page: this.pdf ? (this.pdf.want ?? this.pdf.page) : 0,   // PDF 면 보던 쪽 · 새 창이 첫 파일에서 그 쪽을 연다(범위 밖이면 0)
       zoom: this.zoom === null ? "fit" : this.zoom, list: this.showList, info: this.showInfo, raw: this.raw };
   }
   toggleFull(cx) {
@@ -424,11 +583,20 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
     cx.notify();
   }
   picUp(cx) { if (this.drag) { this.drag = null; cx.notify(); } }
+  // PDF 쪽 넘기기 휠(위로 = 앞 쪽): 누적 NOTCH_PX 마다 한 쪽. 쪽 그리기 실패 화면에서도 쓴다(그림이 없어도 다른 쪽으로 넘길 수 있게).
+  pageWheel(e, cx) {
+    if (!this.pdfPaged()) return;
+    cx.stop_propagation();
+    if (e.touch_phase === "started") this.pw = 0;
+    this.pw += e.delta_lines ? e.delta_lines.y * NOTCH_PX : (e.delta?.y ?? 0);
+    if (Math.abs(this.pw) >= NOTCH_PX) { const d = this.pw > 0 ? -1 : 1; this.pw = 0; this.turn(d, cx); }
+  }
   picWheel(e, cx) {
     if (!this.canZoom()) return;
     const mo = e.modifiers;
     // 누적은 한 제스처 안에서만: 수식키가 없거나 새 제스처가 시작되면 남은 조각을 버린다(앞의 30 px + 뒤의 15 px 가 한 단계로 합쳐지지 않게).
     if (!(mo && (mo.platform || mo.control)) || e.touch_phase === "started") this.wheel = 0;
+    if (e.touch_phase === "started") this.pw = 0;
     if (mo && (mo.platform || mo.control)) {
       cx.stop_propagation();
       // 줄 단위 장치는 한 칸 = 한 단계 · 트랙패드(픽셀)는 누적해 NOTCH_PX 마다 한 단계. 위로 굴리면(양수) 확대.
@@ -438,7 +606,7 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
       if (n !== 0) { this.wheel -= n * NOTCH_PX; this.zoomBy(n, cx, e.local_position); }
       return;
     }
-    if (!this.larger()) return;       // 다 들어오면 그냥 휠은 할 일 없다
+    if (!this.larger()) { this.pageWheel(e, cx); return; }   // 다 들어오면: PDF 면 휠 한 번에 한 쪽 · 아니면 할 일 없다
     cx.stop_propagation();
     const { iw, ih } = this.dims(), c = this.place(iw, ih);
     this.panTo(c.x + (e.delta?.x ?? 0), c.y + (e.delta?.y ?? 0));
@@ -473,11 +641,22 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
       return div().p(14).text_color(t.dim).child(m.total
         ? `받는 중  ${"▓".repeat(fill)}${"░".repeat(8 - fill)} ${pct}%  (${human(m.done ?? 0)} / ${human(m.total)})` : "받는 중…");
     }
-    if (m.state === "error") return div().p(14).text_color(t.dim).child(m.note);
+    if (m.state === "error") {
+      // 쪽 그리기 실패(PDF): 다른 쪽으로 넘길 길을 둔다 — 휠 · 쪽 캡션(PageUp/PageDown · 단추는 그대로).
+      if (this.pdfPaged()) {
+        const pg = this.pdf;
+        return v_flex().id("fp-pic-err").size_full().min_h(0).min_w(0).overflow_hidden().gap(4)
+          .on_scroll_wheel((e, cx) => this.pageWheel(e, cx))
+          .child(div().flex_1().min_h(0).min_w(0).p(14).text_color(t.dim).child(m.note))
+          .child(div().h(20).flex_none().flex().items_center().justify_center().text_size(11).text_color(t.dim).child(`${(pg.want ?? pg.page) + 1} / ${pg.pages}쪽${pg.want !== null ? "…" : ""}`));
+      }
+      return div().p(14).text_color(t.dim).child(m.note);
+    }
     // 측정 전에는 그리지 않는다 → 작은 그림이 커지는 점프 없음. 크기는 늘어난 fp-body 상자와 zoom 으로만 계산(내용 무관).
     if (!(this.box.w > 0 && this.box.h > 0)) return div().size_full();
     const bw = Math.max(40, this.box.w - 24), bh = Math.max(40, this.box.h - 24 - 24);
     let img = image(m.rel).flex_none(), pct = null, view;
+    const pg = this.pdf, pageLabel = pg ? `${(pg.want ?? pg.page) + 1} / ${pg.pages}쪽${pg.want !== null ? "…" : ""}` : null;
     const cap = [m.size ? `${m.size.w}×${m.size.h}` : null, human(m.bytes), m.note].filter(Boolean).join(" · ");
     if (m.size && m.size.w > 0 && m.size.h > 0) {
       const k = this.scale(), { iw, ih } = this.dims(), pos = this.place(iw, ih), big = this.larger();
@@ -499,7 +678,7 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
     }
     return v_flex().size_full().min_h(0).min_w(0).overflow_hidden().gap(4)
       .child(div().flex_1().min_h(0).min_w(0).child(view))
-      .child(div().h(20).flex_none().flex().items_center().justify_center().text_size(11).text_color(t.dim).child([pct, cap].filter(Boolean).join(" · ")));
+      .child(div().h(20).flex_none().flex().items_center().justify_center().text_size(11).text_color(t.dim).child([pageLabel, pct, cap].filter(Boolean).join(" · ")));
   }
 
   listPane(t) {
@@ -594,6 +773,7 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
     if (text && isPlus) { this.setFont(1, cx, held); return true; }
     if (text && isMinus) { this.setFont(-1, cx, held); return true; }
     if (!bare) return false;
+    if ((k === "pagedown" || k === "pageup") && this.pdfPaged() && !this.help) { this.turn(k === "pagedown" ? 1 : -1, cx); return true; }   // PDF 쪽 넘기기(←→↑↓ 는 그대로 파일 넘기기)
     // 스크롤 키(↑ ↓ PageUp PageDown Home End):
     //  · 렌더된 마크다운(TextView): 키보드 스크롤이 없다 → 그림처럼 ↑ 이전 · ↓ 다음 · Home 처음 · End 끝 파일. PageUp/PageDown 은 할 일 없음.
     //  · Editor 글 칸(원문 · 코드 · 글자): 사용자가 글 칸을 눌러 포커스를 줬을 때만(contentFocused) 글 칸으로 흘려보낸다. 아니면 그림처럼 파일 넘기기.
@@ -646,7 +826,8 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
 
   hint() {
     const base = "←→ 이동";
-    if (this.media) return this.canZoom() ? `${base} · +/− 확대 · 0 맞춤 · 1 실제 크기 · 끌어서 이동 · ? 단축키 · Esc 닫기` : `${base} · ? 단축키 · Esc 닫기`;
+    if (this.media?.state === "error" && this.pdfPaged()) return `${base} · PageUp/PageDown 쪽 · ? 단축키 · Esc 닫기`;
+    if (this.media) return this.canZoom() ? `${base}${this.pdfPaged() ? " · PageUp/PageDown 쪽" : ""} · +/− 확대 · 0 맞춤 · 1 실제 크기 · 끌어서 이동 · ? 단축키 · Esc 닫기` : `${base} · ? 단축키 · Esc 닫기`;
     if (this.rendered()) return `${base} · 휠로 스크롤 · +/− 글자 · M 원문/렌더 · ? 단축키 · Esc 닫기`;
     if (this.md && this.code) return `${base} · 글 칸을 누르면 ↑↓ 스크롤 · +/− 글자 · M 원문/렌더 · ? 단축키 · Esc 닫기`;
     if (this.textual()) return `${base} · 글 칸을 누르면 ↑↓ 스크롤 · +/− 글자 · ? 단축키 · Esc 닫기`;
@@ -698,6 +879,10 @@ if [ "$kind" = convert ]; then sips -s format png "$src" --out "$tmp/$name"; els
           .child(this.tool("fp-t-info", "info", "정보 (I)", t, (_e, cx) => { this.showInfo = !this.showInfo; cx.notify(); }, this.showInfo))
           .when(this.md && Boolean(this.code), el => el
             .child(this.tool("fp-t-md", this.raw ? "render" : "code", this.raw ? "렌더 보기 (M)" : "원문 보기 (M)", t, (_e, cx) => this.toggleRaw(cx))))
+          .when(this.pdfPaged(), el => el
+            .child(sep())
+            .child(this.tool("fp-t-pprev", "chevron-up", "이전 쪽 (PageUp)", t, (_e, cx) => this.turn(-1, cx), false, (this.pdf.want ?? this.pdf.page) <= 0))
+            .child(this.tool("fp-t-pnext", "chevron-down", "다음 쪽 (PageDown)", t, (_e, cx) => this.turn(1, cx), false, (this.pdf.want ?? this.pdf.page) >= this.pdf.pages - 1)))
           .when(this.canZoom(), el => el
             .child(sep())
             .child(this.tool("fp-t-zin", "zoom-in", "확대 (+)", t, (_e, cx) => this.zoomBy(1, cx)))
