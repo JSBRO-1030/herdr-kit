@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { previewKey, previewSpec, KEY, newOwner, snapshot, summary, bar, speedometer, send, drain, pushHistory, groupHistory, stateLabel, throttle, safeName, ownerKeys, alive, pushHistoryGroup, own, restoreOwner, orphanedJobs, orphanParts, isPartPath, OWNER_STORE, readShared, startLife, lifeCurrent, seenJids, LIFE_STORE, lifeKey, previewEntry, previewId, livePreviewId, PREVIEW_TTL, partsKey, closingParts, pendingParts, PARTS_CAP } from "../files-plus/state.js";
-import { MIN_W, MIN_H, ABS_MAX, clampRect, fitSize, dragRect, stepFont, fontOf, FONT_STEPS } from "../files-plus/state.js";
+import { SOURCES, MIN_W, MIN_H, ABS_MAX, clampRect, fitSize, dragRect, stepFont, fontOf, FONT_STEPS } from "../files-plus/state.js";
 import { OWNERS_KEY, OWNERS_CAP, OWNER_BEAT_MS, OWNER_DEAD_MS, normalizeOwners, registerOwner, dropOwners, deadOwners, ownerCleanupPlan } from "../files-plus/state.js";
 import { partName } from "../files-plus/transfer.js";
 
@@ -226,7 +226,9 @@ test("safeName: 빈 것 · . · .. · / · NUL 거절", () => {
 
 test("ownerKeys · alive", () => {
   const k = ownerKeys("o");
-  assert.deepEqual(k, ["files-plus.jobs/o", "files-plus.win/o", "files-plus.preview/o", "files-plus.resize/o", "files-plus.req/o/preview", "files-plus.ack/o/preview", "files-plus.req/o/jobs", "files-plus.ack/o/jobs"]);
+  assert.deepEqual(k, ["files-plus.jobs/o", "files-plus.win/o", "files-plus.preview/o", "files-plus.resize/o", "files-plus.req/o/preview", "files-plus.ack/o/preview", "files-plus.req/o/jobs", "files-plus.ack/o/jobs", "files-plus.req/o/ask", "files-plus.ack/o/ask"]);
+  assert.deepEqual(SOURCES, ["preview", "jobs", "ask"]);
+  assert.ok(SOURCES.includes("ask") && k.includes("files-plus.req/o/ask"));
   assert.equal(KEY.win("o"), "files-plus.win/o");
   const { get, set } = store();
   assert.equal(alive(get, "o"), false);

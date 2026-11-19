@@ -1,6 +1,6 @@
-// files-plus(파일+) — 지금 터미널 폴더의 파일 패널. 한 mod 세 모드: 패널(이 파일) · preview(preview.js) · jobs(jobs-view.js).
+// files-plus(파일+) — 지금 터미널 폴더의 파일 패널. 한 mod 다섯 모드: 패널(이 파일) · preview(preview.js) · jobs(jobs-view.js) · menu · ask(ask-view.js).
 // 바탕: herdr-app 기본 mod `files`(defaults/mods/files · Apache-2.0 · herdr-app ce0fd1b)의 폴더 읽기·트리.
-// 패널이 하는 일: 트리 · 전송 큐 실행(주인) · 진행 게시 · 팝업 요청 처리 · 팝업 열기. 설계: docs/popups-design.md §3.
+// 패널이 하는 일: 트리 · 전송 큐 실행(주인) · 진행 게시 · 팝업 요청 처리 · 팝업 열기 · 새 폴더/이름 바꾸기/지우기 실행. 설계: docs/popups-design.md §3 · §8.
 // Windows 머신 폴더 읽기(PowerShell 길)는 뺐다 — 옮기기가 sh 로만 돈다.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -8,9 +8,11 @@ import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window,
 import { makeTransfer, oneAtATime } from "./transfer.js";
 import { Preview, ResizeFrame, openPreviewWindow } from "./preview.js";
 import { dedupeNested, replaceGroupLines } from "./tree.js";
+import { FileMenu, AskDialog } from "./ask-view.js";
+import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
-import { KEY, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
+import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
 // 숨긴 폴더: 앱은 mod 폴더의 보이는 파일이 바뀌면 mod 를 다시 읽는다.
@@ -48,7 +50,7 @@ async function directory(path, on) {
   return out;
 }
 
-const parent = (rel) => (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
+const parent = parentRel;
 
 export default class FilesPlus extends View {
   // 앱 루트 mod 의 init 인자는 호스트가 mod props 로 채우지 않는다(gpui-kit.d.ts View.init = gpui-shell 중첩 뷰 Props) →
@@ -58,6 +60,9 @@ export default class FilesPlus extends View {
     if (p.mode === "preview") { this.impl = new Preview(p, cx); return; }
     if (p.mode === "preview-resize") { this.impl = new ResizeFrame(p, cx); return; }
     if (p.mode === "jobs") { this.impl = new JobsWindow(p, cx); return; }
+    // [주의] 팝업 모드는 panelInit 앞에서 갈라야 한다 — 빠지면 overlay 가 두 번째 패널이 된다.
+    if (p.mode === "menu") { this.impl = new FileMenu(p, cx); return; }
+    if (p.mode === "ask") { this.impl = new AskDialog(p, cx); return; }
     this.panelInit(cx);
   }
 
@@ -70,13 +75,7 @@ export default class FilesPlus extends View {
     try { this.publish?.cancel(); } catch { /* 종료 중 */ }
     try { this.histPub?.cancel(); } catch { /* 종료 중 */ }
     LIVE.delete(this.owner);
-    // 이 패널의 미리보기 창도 닫는다(주인 없는 고아 창 방지). 창 쪽도 jobs 키가 치워지면 0.5 s 안에 스스로 닫는다(id 가 바뀐 경우의 보험).
-    // 창 id 는 shared 의 previewKey 가 «지금 것»(크게 보기가 새 창으로 바꾸면 그쪽이 쓴다) — 낡은 삶이 아닐 때만 읽는다.
-    const ids = new Set([this.previewId]);
-    // 키 값은 {id, at} — at 이 5 s 안(살아 있는 미리보기)일 때만 믿는다. 낡은 id 는 호스트가 다른 창에 재사용했을 수 있어 닫지 않는다.
-    if (this.lifeOk()) ids.add(livePreviewId(readShared(shared, previewKey(this.owner)), Date.now()));
-    for (const id of ids) if (typeof id === "string" && id) { try { closeOverlay(id); } catch { /* 이미 닫힘 */ } }
-    this.previewId = null;
+    this.closePreview();
     if (!this.lifeOk()) return;     // 낡은 삶(다시 불러오기로 밀려난 빌드) — 새 삶의 shared 를 건드리지 않는다
     try {
       // 검증 중(되돌릴 수 없음)이던 것: 파일은 놓였을 수 있다 → 기록에만 «패널 닫힘 · 검증 중» 으로 남긴다.
@@ -105,6 +104,16 @@ export default class FilesPlus extends View {
     }
   }
 
+  // 이 패널의 미리보기 창을 닫는다(주인 없는 고아 창 방지 · 지운/바꾼 파일을 보이는 창 정리). 창 쪽도 jobs 키가 치워지면 0.5 s 안에 스스로 닫는다(id 가 바뀐 경우의 보험).
+  // 창 id 는 shared 의 previewKey 가 «지금 것»(크게 보기가 새 창으로 바꾸면 그쪽이 쓴다) — 낡은 삶이 아닐 때만 읽는다.
+  closePreview() {
+    const ids = new Set([this.previewId]);
+    // 키 값은 {id, at} — at 이 5 s 안(살아 있는 미리보기)일 때만 믿는다. 낡은 id 는 호스트가 다른 창에 재사용했을 수 있어 닫지 않는다.
+    if (this.lifeOk()) ids.add(livePreviewId(readShared(shared, previewKey(this.owner)), Date.now()));
+    for (const id of ids) if (typeof id === "string" && id) { try { closeOverlay(id); } catch { /* 이미 닫힘 */ } }
+    this.previewId = null; this.previewDir = null;
+  }
+
   // ── 패널 ────────────────────────────────────────────────────────────
   panelInit(cx) {
     // owner 는 copy 의 localStorage 에 둔다(제자리 다시 불러오기에도 이어 씀 · 없으면 이번 삶만). 설계: docs §3.
@@ -117,6 +126,7 @@ export default class FilesPlus extends View {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.jobs = []; this.seq = 0; this.viewer = false; this.groups = new Set();
+    this.tickets = new Map(); this.previewDir = null; this.rightAt = 0;   // 티켓 = 메뉴·이름 창의 1회용 요청권(fsops.js)
     this.tx = makeTransfer(exec, { quarantine: () => this.mac }); this.line = oneAtATime();
     this.cacheDir = `${appHome()}/${CACHE_REL}`;
     // herdr 에는 전역 setTimeout 이 없다 → init 의 AsyncContext 로 cx.timer.after 를 감싼다(Task.cancel() 로 끈다).
@@ -153,7 +163,7 @@ export default class FilesPlus extends View {
         later(10000, false); later(60000, true);
       }
     } catch { /* 정리 실패가 시작을 막지 않게 */ }
-    for (const from of ["preview", "jobs"]) drain(shared, setShared, this.owner, from);
+    for (const from of SOURCES) drain(shared, setShared, this.owner, from);
     if (readShared(shared, KEY.win(this.owner)) != null) setShared(KEY.win(this.owner), null);
     this.publishNow();
     // 주인 등록부(G3): 내 owner 를 올리고 15 s 마다 at 을 새로 쓴다 · 죽은 다른 주인의 흔적은 지금과 60 s 마다 치운다.
@@ -224,7 +234,8 @@ export default class FilesPlus extends View {
     if (entries.length > PER_FOLDER || used + entries.length > TOTAL) this.limited = true;
   }
 
-  refresh(cx) {
+  // force = 파일 작업 직후: 읽는 중이어도 끝난 뒤 한 번 더 읽는다(그 사이 바뀐 것을 놓치지 않게).
+  refresh(cx, force = false) {
     this.loc = location(this.loc);
     const { cwd, on } = this.loc, next = JSON.stringify(this.loc);
     if (next !== this.context?.key) {
@@ -232,9 +243,10 @@ export default class FilesPlus extends View {
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on, space: this.loc.space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = {}; this.watched = null; this.error = null; this.limited = false;
-      this.loading = false;
+      this.loading = false; this.again = false;
     }
-    if (!cwd || this.loading) return;
+    if (!cwd) return;
+    if (this.loading) { if (force) this.again = true; return; }
     const context = this.context;
     this.loading = true;
     this.limited = false;
@@ -256,7 +268,11 @@ export default class FilesPlus extends View {
         if (!this.current(context)) return;
         this.marks = marks; this.error = null; this.watch(cwd, cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
-      finally { if (this.context === context) this.loading = false; cx.notify(); }
+      finally {
+        if (this.context === context) this.loading = false;
+        cx.notify();
+        if (this.context === context && this.again) { this.again = false; this.refresh(cx); }
+      }
     });
   }
 
@@ -288,6 +304,7 @@ export default class FilesPlus extends View {
     const files = found < 0 ? [name] : all, index = found < 0 ? 0 : found;
     // window: 어둡게 하지 않아 옆(전송 창 등)을 누를 수 있고, 안 닫힌다 — 닫기는 Esc · ✕ · 머리줄을 끌어 옮긴다. 주인당 하나: 같은 key 라 다른 파일을 열면 열린 창을 그 자리에서 바꾼다.
     // 열 때마다 가운데에서(자리를 기억하지 않는다) · 옛 창은 openPreviewWindow 가 먼저 닫는다(shared 의 previewKey 에 적힌 id — 크게 보기가 바꾼 것도 포함).
+    this.previewDir = dir;
     this.previewId = openPreviewWindow({ mode: "preview", owner: this.owner, root: this.root, on: this.on, space: this.context?.space, dir, files, index, mac: this.mac, viewer: this.viewer }, false);
   }
 
@@ -657,10 +674,81 @@ export default class FilesPlus extends View {
   // verify(해시 맞추고 자리 잡는 중)는 되돌릴 수 없다 → cancelMany 가 건너뛴다.
   cancelJob(job) { this.cancelMany([job], "취소했다"); }
 
+  // ── 파일 다루기(새 폴더 · 이름 바꾸기 · 지우기) ─────────────────────
+  // 메뉴·이름 창을 열 때 패널이 {root, on, rel…} 를 1회용 티켓에 적는다. 팝업의 요청(shared)은 토큰과 이름/도구만 싣는다 —
+  // 실행은 늘 티켓의 값으로 한다(this.root · 현재 위치로 다시 풀지 않는다). 설계: docs/popups-design.md §8.
+  // row = { rel, dir, name } | null(빈 곳 · 아래 아이콘). 새 폴더가 들어갈 부모: 폴더 줄 = 그 폴더 · 파일 줄 = 그 폴더 · 빈 곳 = 맨 위.
+  fsCtx(row) {
+    const rel = row?.rel ?? "", dir = row ? row.dir === true : true, name = row?.name ?? "", on = this.on ?? null;
+    const into = row ? (dir ? rel : parent(rel)) : "";
+    const names = r => (this.entries.get(r) ?? []).slice(0, 500).map(e => e.name);
+    const token = putTicket(this.tickets, { root: this.root, on, context: this.context, rel, dir, name }, Date.now());
+    return { token, owner: this.owner, on, name, dir, empty: !row, abs: joinAbs(this.root, rel), dirAbs: joinAbs(this.root, into), taken: names(into), siblings: row ? names(parent(rel)) : [] };
+  }
+
+  openMenu(row) {
+    if (!this.root || this.closed) return;
+    const ctx = this.fsCtx(row);
+    openOverlay(menuSpec(ctx, menuItems(ctx).length));
+  }
+
+  // 아래 «새 폴더» 아이콘: 맨 위 폴더에 새 폴더.
+  openMkdir() {
+    if (!this.root || this.closed) return;
+    openOverlay(askSpec(askProps(this.fsCtx(null), "mkdir")));
+  }
+
+  fsop(op, a, cx) {
+    const t = takeTicket(this.tickets, a.token, Date.now());
+    if (!t) { notify({ title: "요청이 오래됐다 — 다시 할 것", level: "warning" }); return; }
+    const v = opPlan(op, t, a);
+    if (!v.ok) { notify({ title: "요청 거절", body: v.why, level: "error" }); return; }
+    // 이름 바꾸기·지우기는 전송이 하나라도 돌면 거절(옮기는 중인 경로를 바꾸지 않게). 새 폴더는 된다.
+    const busy = () => op !== "mkdir" && this.jobs.some(j => ACTIVE.has(j.state));
+    const wait = () => notify({ title: "전송이 끝난 뒤 다시", body: v.name ?? v.from, level: "warning" });
+    if (busy()) { wait(); return; }
+    this.ops = this.ops ?? oneAtATime();      // 한 줄로: 파일 작업끼리 겹치지 않는다
+    const context = t.context, FAIL = { mkdir: "폴더를 만들지 못했다", rename: "이름을 바꾸지 못했다", delete: "지우지 못했다" };
+    cx.spawn(async cx => {
+      try {
+        await this.ops(async () => {
+          if (busy()) { wait(); return; }       // 줄 서 있는 사이 전송이 시작됐을 수 있다
+          let r;
+          try { r = await exec("sh", ["-c", v.script, "files-plus", ...v.args], { on: v.on, timeout: v.timeout }); }
+          catch { notify({ title: "결과를 알 수 없다 — 목록을 새로 고친다", level: "warning" }); return; }   // 시간 초과 · 연결 끊김
+          if (r.code !== 0) { notify({ title: FAIL[op], body: opError(r), level: "error" }); return; }
+          if (this.context === context) this.applyFsop(v, cx);
+          notify(op === "mkdir" ? { title: "폴더를 만들었다", body: v.name, level: "success" }
+            : op === "rename" ? { title: "이름을 바꿨다", body: `${v.from} → ${v.to}`, level: "success" }
+            : { title: v.tool === "none" ? "지웠다" : "휴지통으로 옮겼다", body: v.name, level: "success" });
+        });
+      } catch { /* 알림은 위에서 냈다 */ }
+      finally { if (!this.closed) this.refresh(cx, true); }
+    });
+  }
+
+  // 성공한 작업을 트리 상태에 바로 반영한다(다음 refresh 가 디스크 기준으로 바로잡는다).
+  applyFsop(v, cx) {
+    const list = this.entries.get(v.parentRel);
+    if (v.op === "mkdir") {
+      if (list) this.entries.set(v.parentRel, withEntry(list, { name: v.name, dir: true }));
+      if (v.parentRel && !this.folders.has(v.parentRel)) this.toggle(v.parentRel, cx);   // 접힌 부모면 펼쳐 새 폴더가 보이게
+    } else if (v.op === "rename") {
+      if (list) this.entries.set(v.parentRel, renamedEntry(list, v.from, v.to));
+      if (v.isDir) { const r = renameTree(this.folders, this.entries, v.rel, v.newRel); this.folders = r.folders; this.entries = r.entries; }
+    } else {
+      if (list) this.entries.set(v.parentRel, withoutEntry(list, v.name));
+      const r = dropTree(this.folders, this.entries, v.rel); this.folders = r.folders; this.entries = r.entries;
+    }
+    // 열려 있는 미리보기가 그 폴더 목록(또는 지운/바꾼 폴더 안)이면 닫는다 — 없어진 파일을 계속 보이지 않게.
+    if (v.op !== "mkdir" && this.previewDir != null && (this.previewDir === v.parentRel || this.previewDir === v.rel || this.previewDir.startsWith(v.rel + "/"))) this.closePreview();
+    cx.notify();
+  }
+
   // 팝업 요청함(300 ms). 모르는 action 은 무시한다.
   inbox(cx) {
     if (this.closed || !this.lifeOk()) return;    // 낡은 삶은 요청함도 비우지 않는다(ack 를 올려 새 삶의 요청을 가로채지 않게)
-    for (const from of ["preview", "jobs"]) {
+    for (const from of SOURCES) {
       for (const req of drain(shared, setShared, this.owner, from)) {
         try { this.handle(req.action, req.args ?? {}, cx); } catch { /* 한 요청 오류가 나머지를 막지 않게 */ }
       }
@@ -689,6 +777,7 @@ export default class FilesPlus extends View {
         this.publishNow();
       }
     }
+    else if (action === "mkdir" || action === "rename" || action === "delete") { this.fsop(action, a, cx); }
     else if (action === "clearHistory") { this.histBuf = []; for (const g of this.groups) { g.byState = { ok: [], fail: [], cancel: [] }; g.fresh = 0; g.dirty = false; } if (this.lifeOk()) setShared(KEY.history, []); }   // 돌고 있는 그룹이 모아 둔 항목도 비운다 — 안 그러면 다음 그룹 쓰기에 지운 기록이 되살아난다
     else return;
     cx.notify();
@@ -702,7 +791,8 @@ export default class FilesPlus extends View {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       const into = entry.dir ? path : prefix;
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.openPreview(path))
+        .on_click((_e, cx) => { if (Date.now() - (this.rightAt ?? 0) < 400) return; entry.dir ? this.toggle(path, cx) : this.openPreview(path); })   // 오른쪽 클릭이 on_click 도 낼 수 있다(문서 없음) → 막 연 메뉴 뒤 400 ms 는 무시
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.rightAt = Date.now(); this.openMenu({ rel: path, dir: entry.dir, name: entry.name }); })
         .on_drop((e, cx) => { cx.stop_propagation(); this.upload(e.paths, into, cx); })
         .child(entry.dir ? svg(icon(`chevron-${open ? "down" : "right"}`)).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(icon(entry.dir ? "folder" : "file")).size(14).flex_none().text_color(t.muted))
@@ -713,13 +803,16 @@ export default class FilesPlus extends View {
     return out;
   }
 
-  // 아래 줄: 왼쪽 올리기 아이콘(macOS) + 흐린 «끌어다 놓기» · 오른쪽 전송 칩(작업 있을 때만).
+  // 아래 줄: 왼쪽 올리기 아이콘(macOS) · 새 폴더 아이콘 + 흐린 «끌어다 놓기» · 오른쪽 전송 칩(작업 있을 때만).
   bottomRow(t) {
     const s = summary(this.jobs);
     return h_flex().id("files-bottom").h(32).flex_none().px(10).gap(8).items_center().border_t(1).border_color(t.border)
       .when(this.mac && Boolean(this.root), el => el.child(h_flex().id("act-up").w(24).h(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
         .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("올리기")
         .on_click((_e, cx) => this.pick("", cx)).child(svg(icon("upload")).size(16).flex_none())))
+      .when(Boolean(this.root), el => el.child(h_flex().id("act-mkdir").w(24).h(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
+        .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("새 폴더")
+        .on_click(() => this.openMkdir()).child(svg(icon("folder-plus")).size(16).flex_none())))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child("끌어다 놓기"))
       .when(s.total > 0, el => el.child(h_flex().id("files-chip").h(22).px(8).flex_none().items_center().rounded(11).border_1().border_color(t.border).cursor_pointer()
         .text_size(11).text_color(s.failed > 0 ? t.blocked : s.running + s.waiting > 0 ? t.accent : t.muted).hover(x => x.bg(t.hover))
@@ -737,7 +830,7 @@ export default class FilesPlus extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("파일+"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(where)))
-      .child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+      .child(v_flex().id("files-tree").on_mouse_down("right", () => this.openMenu(null)).flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error), el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error)))
         .when(empty, el => el.child(v_flex().p(8).gap(2)
           .child(div().text_size(12).text_color(t.dim).child(this.loading ? "불러오는 중…" : this.root ? "비어 있음" : "폴더 없음"))

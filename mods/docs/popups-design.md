@@ -3,7 +3,7 @@
 확정 시안: C2 (원본 mod 프로젝트의 `designs/files-plus-popups-20261115/mock-C2-default.png` · `mock-C2-open.png`).
 화면 글자는 모두 한글. 키 이름(Esc · ←→)과 앱 이름 Finder 만 그대로.
 
-## 1. 구조 — 한 mod, 세 모드
+## 1. 구조 — 한 mod, 다섯 모드
 
 같은 `files-plus` 폴더를 `props.mode` 로 나눈다(`agents` mod 의 `sortMenu` 선례 · `herdr.d.ts` OverlaySpec).
 
@@ -12,6 +12,8 @@
 | panel (props 없음) | 레이아웃 블록 | 트리 · 전송 큐 실행(주인) · 진행 게시 · 요청 처리 · 팝업 열기 | `main.js` |
 | `preview` | `openOverlay kind:"window" frame:"none"` — **overlay key 없음** · 가운데 `at`(`previewSpec`) · 주인당 하나는 shared `files-plus.preview/<owner>` 에 «지금 열린 id» 를 적어 지킨다 | 미리보기 · 목록/정보 칸 · 아이콘 줄 · 키 | `preview.js` |
 | `jobs` | `openOverlay kind:"window" frame:"none" key:"files-plus-jobs/<owner>"` | 전송 막대 · 펼침 목록 · 기록 · 아이콘 4개 | `jobs-view.js` |
+| `menu` | `openOverlay kind:"popup"`(커서 자리) | 트리 줄 오른쪽 클릭 메뉴 — §8 | `ask-view.js` |
+| `ask` | `openOverlay kind:"dialog" modal:true` | 이름 입력 · 지우기 확인 — §8 | `ask-view.js` |
 
 - 전송은 **패널만** 돌린다. 팝업 copy 의 작업은 팝업을 닫으면 죽는다(AGENTS.md mod lifetime). 팝업은 보여 주고 요청만 보낸다.
 - 공통 계약(공유 키 · 요청함 · 요약 · 막대 · 기록)은 `state.js`(herdr 를 import 하지 않는 순수 모듈, node 시험 가능).
@@ -21,6 +23,8 @@
 init(props, cx) {
   if (props?.mode === "preview") { this.impl = new Preview(props, cx); return; }
   if (props?.mode === "jobs") { this.impl = new JobsWindow(props, cx); return; }
+  if (props?.mode === "menu") { this.impl = new FileMenu(props, cx); return; }   // panelInit 앞에서 갈라야 한다 — 빠지면 overlay 가 두 번째 패널이 된다
+  if (props?.mode === "ask") { this.impl = new AskDialog(props, cx); return; }
   // …패널
 }
 render(cx) { return this.impl ? this.impl.render(cx) : this.panelRender(cx); }
@@ -32,14 +36,14 @@ async close(cx) {
 
 **mod props 는 `props()` 로 읽는다(P0)**: 앱 루트 mod 의 `init(props, cx)` 인자는 호스트가 mod props 로 채우지 않는다(`gpui-kit.d.ts` View.init 의 props = gpui-shell 중첩 뷰 Props · 기본 mod `confirm` 은 `init(_props, cx)` + `herdr` 의 `props()`). 그래서 `main.js` 는 `props as modProps` 를 import 해 `const p = modProps() ?? initProps ?? {}` 로 갈라 `p` 를 `Preview`·`JobsWindow` 에 넘긴다(`herdr-app check` 같은 대역이 인자로 줄 때를 위해 인자는 대비로만). overlay id 는 `props()?.overlay`. 패널 모드는 props 를 읽지 않는다. 이걸 인자로 읽으면 실제 앱에서 팝업이 패널(파일 트리)로 뜬다.
 
-`Preview` · `JobsWindow` 는 View 가 아닌 평범한 class: `constructor(props, cx)` · `render(cx)` → 요소 · `close(cx)`(선택). 오버레이 id 는 `props.overlay`.
+`Preview` · `JobsWindow` · `FileMenu` · `AskDialog` 는 View 가 아닌 평범한 class: `constructor(props, cx)` · `render(cx)` → 요소 · `close(cx)`(선택). 오버레이 id 는 `props.overlay`.
 
 ## 2. state.js — 공통 계약 (정확히 이 이름·꼴)
 
 ```js
 export const KEY = {
   jobs: owner => `files-plus.jobs/${owner}`,        // 패널이 쓴다 · 팝업이 읽는다
-  req: (owner, from) => `files-plus.req/${owner}/${from}`,  // from = "preview" | "jobs" · 그 팝업만 쓴다
+  req: (owner, from) => `files-plus.req/${owner}/${from}`,  // from = SOURCES("preview" | "jobs" | "ask") 중 하나 · 그 팝업만 쓴다
   ack: (owner, from) => `files-plus.ack/${owner}/${from}`,  // 패널만 쓴다
   win: owner => `files-plus.win/${owner}`,          // 전송 창이 쓴다: 열림 {t: 토큰, expanded} · 닫히면 null
   history: "files-plus.history",                    // 패널만 쓴다(기록 지우기 요청도 패널이 처리)
@@ -96,7 +100,7 @@ export function throttle(fn, ms /* 숫자 | () => 숫자 */, timers /* 필수 */
 
 `페이지로`(`run("pane.split", …)`) · Finder 열기(`exec("open", [...])`) 는 오래 걸리지 않아 팝업이 바로 한다.
 
-패널은 `cx.timer.every(300)` 로 `drain(…, "preview")` · `drain(…, "jobs")` 를 돈다(숨은 copy 도 타이머는 돈다).
+패널은 `cx.timer.every(300)` 로 `SOURCES`(`preview` · `jobs` · `ask`)마다 `drain` 을 돈다(숨은 copy 도 타이머는 돈다).
 
 ## 3. 패널 (main.js)
 
@@ -108,8 +112,8 @@ export function throttle(fn, ms /* 숫자 | () => 숫자 */, timers /* 필수 */
   - **기록 id · 중복 제거(P6·P7)**: 기록 항목에 `jid = "<삶 토큰>:<작업 id>"`(묶음 줄은 접힌 것들의 `jids` 150개까지). panelInit 의 `orphanedJobs(old, now, seenJids(history))`: wait·run → 실패 «다시 불러옴» · **verify → 취소 «다시 불러옴 · 검증 중»**(close 와 같은 규칙 — PLACE 는 계속 돌아 파일이 놓였을 수 있다) · 이미 끝난(ok·fail·cancel) 작업 중 기록에 없는 것(늦춤 쓰기 전에 다시 불러옴)은 그 상태로 한 번 · 스냅샷이 잘라 낸 `more` 는 상태별로 «외 N개» 한 줄씩(wait·run → 실패, verify → 취소 — 한 묶음에 섞으면 접힌 줄이 첫 항목의 상태를 따라 실패 56개가 취소 7개로 보인다). 이미 기록된 jid 는 wait·run·verify 에서도 건너뛴다. 스냅샷은 `noHistory` 를 싣고 `orphanedJobs` 가 건너뛴다(«Mac에서 열기» 사본이 기록에 오르지 않는다).
   - **읽기 방어(P3)**: 모든 shared 읽기는 `readShared`(던지면 null). close 는 읽기가 던지는 키도 null 로 치운다 — `writeHistory` 가 던져도 키 치우기는 `finally` 에서 돈다.
   - **throttle 창(P8)**: `활성(wait·run·verify) 수 > 30` 일 때만 1 s(끝난 작업 30개가 이후 모든 전송을 1 s 로 묶지 않는다).
-  - `close()` 가 `ownerKeys(owner)`(jobs · win · req/ack × preview/jobs = 6개) 를 `null` 로 치운다(값이 있는 것만 · 닫힌 뒤 `publishNow` 는 막혀 되살리지 않는다). 열려 있는 팝업은 `alive(shared, owner)`(jobs 키가 객체인가)로 패널 생존을 본다. 죽었으면 download/open/cancel/retry/clear 요청 대신 `notify`(«파일+ 패널이 닫혀 있다») · 막대는 «패널 닫힘».
-  - **tombstone 상한**: shared 는 `setShared(key, null)` 도 `null` 로 영속한다(키가 사라지지 않는다 · 키 목록 API 없음). owner 가 copy 에 붙어 있으므로 키 수 ≤ 6 × (지금까지 만든 서로 다른 패널 블록 수) — 다시 불러오기·앱 재시작 횟수에는 비례하지 않는다. (localStorage 가 없는 환경이면 삶마다 6개씩 는다 — 이 앱에서는 해당 없음, 위 probe 로 확인.)
+  - `close()` 가 `ownerKeys(owner)`(jobs · win · preview · resize + req/ack × `SOURCES` 셋 = 10개) 를 `null` 로 치운다(값이 있는 것만 · 닫힌 뒤 `publishNow` 는 막혀 되살리지 않는다). 열려 있는 팝업은 `alive(shared, owner)`(jobs 키가 객체인가)로 패널 생존을 본다. 죽었으면 download/open/cancel/retry/clear 요청 대신 `notify`(«파일+ 패널이 닫혀 있다») · 막대는 «패널 닫힘».
+  - **tombstone 상한**: shared 는 `setShared(key, null)` 도 `null` 로 영속한다(키가 사라지지 않는다 · 키 목록 API 없음). owner 가 copy 에 붙어 있으므로 키 수 ≤ 10 × (지금까지 만든 서로 다른 패널 블록 수) — 다시 불러오기·앱 재시작 횟수에는 비례하지 않는다. (localStorage 가 없는 환경이면 삶마다 10개씩 는다 — 이 앱에서는 해당 없음, 위 probe 로 확인.)
   - **알려진 한계**: ① 크래시·강제 종료로 `close()` 가 못 돈 owner 키는 값이 남는다(다음 실행에서 같은 owner 를 이어 받아 덮어쓰므로 그 copy 는 정리됨 · copy 가 없어졌다면 고아로 남는다). ② 크래시로 남은 `.part` · 다시 불러오기(close 가 안 불림)로 남은 `.part` 는 자동으로 지우지 않는다 — 설계상 init·glob 삭제 없음(정확한 경로만 지운다). ② 갱신: 죽은 삶(life 토큰이 지금과 다름)의 스냅샷에는 도는(run) 작업의 `part`·`partOn` 이 실려 있다(`snapshot` — 조각 이름 꼴일 때만). panelInit 이 `orphanParts(old, life)` 로 그 정확한 경로만 고르고(wait·verify 는 제외 · 폴더/glob 없음 · `isPartPath`: 절대 경로 + `.<fnv8>.files-plus-<rand8>.part` · `..` 없음) 이 컴퓨터는 `/bin/rm -f --`, 원격은 `exec("rm", ["-f","--",path], {on})` 로 지운다. 다른 owner 의 키 · 조각은 **주인 등록부**(G3)로 치운다: 공용 키 `files-plus.owners` = `[{owner, at}]` ≤ 20, 산 copy 가 init 에 올리고 15 s 마다(더 자주 금지 — setShared 가 모든 mod 를 다시 그린다) `at` 을 갱신. init 과 60 s 마다, 내가 아니고 · 이 프로세스 `LIVE` 에 없고 · `at` 이 60 s 넘게 낡은(쓰레기·먼 미래 `at` 은 «처음 본 때» 로 60 s) 주인의 뒷정리를 내 이전 삶과 똑같이 한다(`ownerCleanupPlan`: `orphanedJobs` → 기록(jid 중복 제외) · `orphanParts(snap, null)` + `files-plus.parts/<owner>` → `rmPart`(즉시 + ~10 s · ~60 s) · `ownerKeys` + parts 키 → null) 뒤 등록부에서 뺀다. 산 주인은 건드리지 않는다. **정리는 패널이 초기화될 때만 돈다(G4): 앱을 다시 켠 뒤 패널이 자동으로 안 열리면 열 때까지 기다린다.** (옛 한계: 제자리 다시 불러오기 뒤 새 copy 가 옛 owner 가 «살아 있어서» 새 owner 를 받으면, 크래시 뒤 다시 뜬 패널이 저장소의 옛 owner 만 이어 받아 새 owner 의 jobs · .part 가 아무에게도 안 치워졌다 — VM 확인.) 그 owner 의 localStorage(삶 토큰)는 copy 별 저장소라 못 건드린다. ②-1 `close()` 의 `rm -f` 는 PREP·PUSH 가 조각을 여는 순간과 경합할 수 있어 지운 조각이 다시 나타날 수 있다. ③ 미리보기의 변환(`qlmanage`·`sips`)은 취소할 수 없다(최대 120 초) — `exec` 에 Task·AbortSignal·kill 이 없다(herdr.d.ts `exec`: `{cwd, on, timeout}` 뿐). 파일을 넘기거나 창을 닫으면 결과만 버린다. ④ 패널 숨김(`layout.hide`)을 mod 가 알 방법이 없다(`layout()` 의 모양이 문서에 없고 가시성 콜백도 없다) → 미리보기 창이 남는다(Esc · ✕).
 - 파일 줄 클릭 → `openPreview(path)`: 그 파일 폴더의 **파일만**(폴더 제외, 트리와 같은 정렬) 이름 배열과 index 를 props 로.
   ```js
@@ -226,3 +230,30 @@ export function throttle(fn, ms /* 숫자 | () => 숫자 */, timers /* 필수 */
 - 화면 검사: `herdr-app check` 는 props 없이 한 번 그린다 → 패널. preview · jobs 는 scratch 사본의 `init` 에 가짜 props 를 넣어 각각 `check passed` 확인(저장소엔 넣지 않음).
 - drag-over 이벤트가 없어 놓기 전 강조는 하지 않는다(gpui-kit.d.ts 에 `on_drop` 만 있음).
 - 진행률은 4 MiB 조각 단위로 오른다.
+
+## 8. 파일 다루기 (새 폴더 · 이름 바꾸기 · 지우기)
+
+트리 줄 오른쪽 클릭(메뉴) · 아래 «새 폴더» 아이콘 → 이름 창/확인 창 → 패널이 실행한다. 모든 OS · 이 컴퓨터와 원격 모두. 전송 창 기록에는 남기지 않고 알림(`notify`)만 낸다.
+
+- **두 모드** (`ask-view.js`):
+  - `menu` — `kind:"popup"` 커서 자리 · 폭 200 · 높이 `10 + 31 × 줄 수`. 줄 = 폴더/파일 줄 «새 폴더 · 이름 바꾸기 · 지우기…» · 트리 빈 곳 «새 폴더» 하나. ↑↓ · Enter · Esc · 마우스. 고르면 메뉴를 닫고 `ask` 를 연다(패널이 죽었으면 닫기만).
+  - `ask` — `kind:"dialog" modal:true` 폭 440 · 높이 220(이름) / 250(지우기). 이름 창: `InputState` · 새 폴더 기본값 «새 폴더»(있으면 «새 폴더 2» …) 전체 선택 · 이름 바꾸기 기본값 = 지금 이름(파일은 확장자 앞까지 선택 · UTF-16 오프셋) · 틀리면 빨간 한 줄 + 확인 단추 흐림 · 같은 이름(손대지 않은 값 · 앞뒤 공백만 다른 값 포함)으로 Enter = 아무 일 없이 닫기(«같은 이름이 이미 있다» 도 안 낸다). 지우기 창은 뜨면 그 머신에서 `PROBE` 를 돌려 «휴지통으로 옮길까?»(휴지통 도구 있음 · Enter 도 됨) 또는 «영구히 지울까?»(빨간 경고 · **Enter 로 안 지운다** — «영구 삭제» 단추만) 를 보인다. `PROBE` 실패 = «확인하지 못했다: 사유» · 확인 단추 없음. **누르고 있는 키(`is_held`)는 메뉴 · 지우기 창의 key 처리에서만 무시**(이름 입력 창의 `Input` submit 이벤트에는 `is_held` 가 없다) · 창이 열린 뒤(지우기는 `PROBE` 결과가 온 뒤) 350 ms 안의 Enter 제출은 이름 창 · 지우기 창 모두 무시(`readyAt` · 단추 클릭은 그대로) — 이름 창에서 Enter 를 350 ms 넘게 누르고 있으면 제출된다(새 폴더 · 이름 바꾸기는 되돌릴 수 있다). 제출 판단은 순수 함수 `submitPlan`(fsops.js)이 한다: `{kind:"none"|"close"|"post", action, args}`.
+- **요청 출처 `"ask"`**: `state.js` 의 `SOURCES = ["preview", "jobs", "ask"]` 한 곳. `ownerKeys` · 패널 `inbox()` · panelInit 의 옛 요청 버리기(`drain`)가 모두 이걸 쓴다 — 하나라도 빠지면 영속 shared 에 남은 옛 «지우기» 요청이 다음 시작에 돈다.
+- **티켓(1회용)**: 패널이 메뉴/이름 창을 열 때 토큰(`Math.random` base36 두 번 · 16자 이상)을 만들어 `this.tickets: Map<token, { root, on, context, rel, dir, name, at }>` 에 둔다. 10분 지나면 무효 · 최대 20개(오래된 것부터 버림) · **쓰면 지운다**. overlay props 에는 토큰과 보여 주기용 값(표시 경로 · 이름 · 폴더 여부 · `taken` 이름들 · 지우기 `PROBE` 용 `abs`/`on`)만 넣는다. 요청은 **경로를 담지 않는다**.
+- **액션 셋** (`send(shared, setShared, owner, "ask", 액션, 인자)`):
+
+| action | args | 패널이 하는 일 |
+|---|---|---|
+| `mkdir` | `{ token, name }` | 티켓의 폴더(폴더 줄 = 그 폴더 · 파일 줄 = 그 파일의 폴더 · 빈 곳/아래 아이콘 = 맨 위)에 `MKDIR` |
+| `rename` | `{ token, to }` | 티켓의 항목을 같은 폴더 안에서 `RENAME` |
+| `delete` | `{ token, tool, id }` | 티켓의 항목을 `REMOVE`(`tool` ∈ `TOOLS` · `id` = `PROBE` 가 본 «종류:dev:ino» — 형식 `^[dfl]:(-|\d+):\d+$` 아니면 거절) |
+
+- **패널 검증** (`fsop`): ① `takeTicket` — 없거나 낡았으면 notify «요청이 오래됐다 — 다시 할 것» ② `opPlan(op, ticket, args)` — 티켓 값도 다시 검사(root 절대 · NUL 없음 · `rel` 은 `relOk` · rename/delete 는 `rel` 비면 거절 · 이름은 `nameProblem` + 앞뒤 공백 거절 · `tool` ∈ `TOOLS` · `id` 형식) ③ 이름 바꾸기·지우기는 전송(wait/run/verify)이 있으면 거절(notify «전송이 끝난 뒤 다시» · 줄에 선 뒤 한 번 더 본다 · 새 폴더는 된다) ④ `oneAtATime` 한 줄로 `exec("sh", ["-c", SCRIPT, "files-plus", …args], { on: 티켓의 on, timeout })`(mkdir/rename 15 s · 휴지통 60 s · none 10 min) ⑤ 성공이면 트리 상태를 바로 고치고(`this.context === 티켓의 context` 일 때만) 알림, 실패면 `opError`, `exec` 가 던지면 «결과를 알 수 없다 — 목록을 새로 고친다». 끝에 늘 `refresh(cx, true)`(읽는 중이면 끝난 뒤 한 번 더).
+- **스크립트** (`fsops.js` · 경로는 위치 인자로만 · 새 폴더에 `mkdir -p` 없음 · 지울 대상 끝에 `/` 를 붙이지 않는다):
+  - `MKDIR $1=부모 $2=이름` · `RENAME $1=부모 $2=지금 이름 $3=새 이름` · `PROBE $1=대상`(한 줄 `<도구> <d|f|l> <수> <id>` · id = `<종류>:<dev>:<ino>` — `stat -c`(GNU) 먼저 · 안 되면 `stat -f`(BSD) · 그것도 안 되면 `-:<ls -di 의 ino>` · 링크를 따라가지 않는다 · 읽지 못하면 6) · `REMOVE $1=도구 $2=대상 $3=id`. **확인-실행 묶음**: 창이 본 대상 = 지울 대상 — `REMOVE` 가 지우기 직전 id 를 다시 계산해 다르면(종류가 바뀐 경우 포함) 10.
+  - **종료 코드**: 0 성공 · 2 잘못된 인자 · 3 대상 없음 · 6 폴더/쓰기/실행 오류 · 7 이름 충돌 · 8 보호(홈) · 9 결과 확인 실패 · 10 확인한 뒤 대상이 바뀜 · 11 일부만 지워짐(영구 삭제 도중 실패 — 대상이 남아 있고 일부는 이미 지워졌을 수 있다 · 되돌릴 수 없다) · 12 안에 다른 볼륨(마운트)이 붙어 있어 거절(Linux 영구 삭제). 오류는 stderr 한 줄(한국어).
+  - `RENAME`: inode(`ls -di`)로 «같은 항목»(대소문자·정규화만 다른 이름 · 하드링크)을 가려 두 단계(숨긴 임시 이름 `.files-plus-rename-<pid>`)로 옮기되 하드링크면 되돌리고 7. 그 밖은 `mv -n`(GNU 는 `-T`)으로 덮어쓰지 않는다. 두 단계 길도 둘째 `mv` 뒤에 inode 를 확인한다(GNU 는 `-T`) — 그새 새 이름이 생겨 둘째 `mv` 가 못 옮겼거나 새 폴더 안으로 들어갔으면 원래 이름으로 되돌리고 7(대소문자·정규화만 다른 이름은 새로 생긴 것과 원래 이름이 같은 항목이라 되돌릴 자리가 없을 수 있다 → 항목은 임시 이름으로 남고 메시지가 그 이름을 알린다). 끝에 사후 확인(inode · 목록에 정확한 새 이름이 있고 옛 이름이 없음 — 대소문자 무시 FS 에서는 `-e` 로 못 봐서 목록으로 본다).
+  - `PROBE`/`REMOVE` 도구: macOS `/usr/bin/trash -s`(`uname` = Darwin 이고 실행 가능일 때만 — 리눅스 trash-cli 의 `trash` 와 구별) > `gio trash --` > `trash-put --` > `none`(폴더는 재귀 삭제 · 링크와 파일은 `-r` 없이). **영구 삭제는 마운트 지점을 넘지 않는다**: Linux 는 `rm` 종류와 무관하게 먼저 `/proc/self/mountinfo`(시험은 `FP_MOUNTINFO`)의 마운트 지점(5번째 칸 · 8진 이스케이프 풀기)이 대상과 같거나 그 아래면 12 «안에 다른 볼륨(마운트)이 붙어 있어 지우지 않는다» 로 거절하고(마운트 정보를 못 읽거나 줄이 하나도 없거나 대상의 실제 위치(`cd -P`)를 못 구하면 6 · 닫힘 — 마지막은 «대상 폴더의 실제 위치를 읽지 못해» 로 따로 알린다 · awk 는 `LC_ALL=C` · uutils rm 은 `--one-file-system` 을 받고 무시한다), 통과하면 `rm --version` 에 `GNU coreutils` 가 있으면 OS 무관 `rm -r -f --one-file-system`(Darwin + brew coreutils 포함) · GNU 가 아닌 Linux(uutils · busybox)는 `rm -r -f`. GNU 가 아닌 Darwin 등 그 밖 OS 는 `rm -r -f -x`(`PROBE` 의 항목 수는 `find -xdev -mindepth 1`). 플래그를 모르는 `rm` 이면 오류로 끝내고 플래그 없는 `rm` 으로 다시 시도하지 않는다(닫힘). `PROBE` 는 정규 파일(`-f`)만 열어 크기를 센다 — FIFO · 장치 · 소켓은 열지 않고 `f -1`. 휴지통이 실패하면 영구 삭제로 넘어가지 않는다(6). 홈 폴더와 그 위 폴더는 8.
+- **무엇을 보장하지 않나**: 확인과 `mv`/`mkdir` 사이 TOCTOU(사후 확인으로 잡는다) · 열려 있는 미리보기 창(패널은 그 폴더 목록이거나 지운/바꾼 항목 안이면 닫는다 — 다른 창은 못 닫는다).
+- 아이콘: `folder-plus.svg` · `rename.svg` · `trash.svg`(§6 규칙).
+- 시험: `tests/fsops.test.mjs`(순수 함수 + 진짜 `/bin/sh` · 임시 폴더 · 가짜 휴지통 · `HOME` 덮어쓰기). 진짜 macOS `trash` 한 건은 `FP_REAL_TRASH=1` 일 때만 돈다.

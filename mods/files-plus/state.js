@@ -1,9 +1,9 @@
-// 패널 ↔ 팝업(미리보기·전송 창) 공통 계약 — herdr 모듈을 쓰지 않는 순수 함수 모음(node · QuickJS 둘 다 돈다).
+// 패널 ↔ 팝업(미리보기·전송 창·메뉴/확인 창) 공통 계약 — herdr 모듈을 쓰지 않는 순수 함수 모음(node · QuickJS 둘 다 돈다).
 // shared(key) → 값 · setShared(key, 값) 은 인자로 받는다(시험에서는 Map 대역).
 
 export const KEY = {
   jobs: owner => `files-plus.jobs/${owner}`,                 // 패널이 쓴다 · 팝업이 읽는다
-  req: (owner, from) => `files-plus.req/${owner}/${from}`,   // from = "preview" | "jobs" · 그 팝업만 쓴다
+  req: (owner, from) => `files-plus.req/${owner}/${from}`,   // from = SOURCES 중 하나("preview" | "jobs" | "ask") · 그 팝업만 쓴다
   ack: (owner, from) => `files-plus.ack/${owner}/${from}`,   // 패널만 쓴다
   win: owner => `files-plus.win/${owner}`,                   // 전송 창이 쓴다: 열려 있으면 {t: 토큰, expanded} · 닫히면 null
   history: "files-plus.history",                             // 패널만 쓴다
@@ -197,9 +197,13 @@ export function previewSpec({ mod, owner: _owner, props, full = false, viewport 
   return spec;
 }
 
+// 요청 출처(팝업 종류) — 요청함 req/ack 키를 가진다. ownerKeys · 패널의 요청함(inbox) · 시작 때 옛 요청 버리기(drain)가 모두 이 목록을 쓴다.
+// [경고] 새 출처를 여기에 빼먹으면 영속 shared 에 남은 옛 요청(예: «지우기»)이 다음 시작에 돈다.
+export const SOURCES = ["preview", "jobs", "ask"];
+
 // 이 주인이 만든 shared 키 전부 — 패널이 닫힐 때 null 로 치운다(영속 shared 에 쌓이지 않게).
 export function ownerKeys(owner) {
-  return [KEY.jobs(owner), KEY.win(owner), previewKey(owner), KEY.resize(owner), ...["preview", "jobs"].flatMap(f => [KEY.req(owner, f), KEY.ack(owner, f)])];
+  return [KEY.jobs(owner), KEY.win(owner), previewKey(owner), KEY.resize(owner), ...SOURCES.flatMap(f => [KEY.req(owner, f), KEY.ack(owner, f)])];
 }
 
 // 호스트 shared() 는 저장된 값 어딘가에 `toString` 키가 있으면 던진다("'toString' is read-only").
@@ -223,7 +227,7 @@ export function newOwner() {
 
 // 패널의 owner 는 copy 의 localStorage 에 둔다: 제자리 다시 불러오기(파일 저장)에도 close() 가 안 불려서(AGENTS.md)
 // 새 owner 를 만들면 옛 owner 의 jobs 키가 객체로 남아 alive() 가 영영 참이 된다 → 같은 copy 는 같은 owner 를 이어 쓴다.
-// 그래서 shared 에 남는 owner 키 수 = (서로 다른 패널 블록 수) × 6 이지 다시 불러온 횟수·재시작 횟수가 아니다.
+// 그래서 shared 에 남는 owner 키 수 = (서로 다른 패널 블록 수) × 10 이지 다시 불러온 횟수·재시작 횟수가 아니다.
 // taken = 이 프로세스에서 이미 다른 살아 있는 copy 가 쓰는 owner 들(저장소가 copy 끼리 겹쳐 보일 때를 대비) → 겹치면 새로 짓고 저장하지 않는다.
 export const OWNER_STORE = "files-plus.owner";
 export function restoreOwner(storage, taken = new Set()) {
