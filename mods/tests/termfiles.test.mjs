@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, mkdir, rm, realpath, symlink, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS, scanGate, TF_STUCK_MS, errClass, stuckAfter, noteWrite, termKey } from "../files-plus/termfiles.js";
+import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS, scanGate, TF_STUCK_MS, errClass, stuckAfter, noteWrite, termKey, cellWidth, selSpan, selKey, dcStep, dcPick } from "../files-plus/termfiles.js";
 
 const base = await realpath(await mkdtemp(join(process.env.TMPDIR || tmpdir(), "termfiles-")));
 after(() => rm(base, { recursive: true, force: true }));
@@ -569,4 +569,292 @@ test("noteWrite: 처음 · 분류 바뀜은 바로 · 개수만 바뀌면 minGap
   assert.equal(noteWrite({ ...a, found: 0 }, { ...a, found: 2 }, 2000, 1000), true);
   assert.equal(noteWrite(a, { ...a, cands: 4 }, 2000, 1000), false);
   assert.equal(noteWrite({ ...a, cands: 1 }, { ...a, cands: 2 }, 2000, 1000), false);
+});
+
+// ── 더블클릭 열기: cellWidth · selSpan · dcStep · dcPick (순수 · 합성 경로만) ──
+const cell = (row, col) => ({ row, col });
+const S = (r1, c1, r2, c2) => ({ start: cell(r1, c1), end: cell(r2, c2) });
+
+test("cellWidth: 영문 1 · 한글/CJK/전각 2 · 결합 문자 0 · 빈 값 0", () => {
+  assert.equal(cellWidth("abc"), 3);
+  assert.equal(cellWidth("보고서"), 6);
+  assert.equal(cellWidth("a.txt"), 5);
+  assert.equal(cellWidth("報告"), 4);
+  assert.equal(cellWidth("ＡＢ"), 4);
+  assert.equal(cellWidth("e\u0301"), 1);
+  assert.equal(cellWidth("/tmp/보고서.pdf"), 5 + 6 + 4);
+  assert.equal(cellWidth(""), 0);
+  assert.equal(cellWidth(null), 0);
+});
+
+test("selSpan: 한 줄 · 거꾸로 순서 · 줄 이어짐(cols) · maxRows · 전체 선택 · 나쁜 cols · 나쁜 모양", () => {
+  assert.equal(selSpan(S(5, 3, 5, 7), 80), 5);
+  assert.equal(selSpan(S(5, 7, 5, 3), 80), 5);                  // 끝이 앞 — 순서를 바로잡는다
+  assert.equal(selSpan(S(5, 70, 6, 4), 80), 10 + 5);            // (80-70) + 0 + 4+1
+  assert.equal(selSpan(S(6, 4, 5, 70), 80), 15);
+  assert.equal(selSpan(S(5, 70, 7, 4), 80), 10 + 80 + 5);
+  assert.equal(selSpan(S(5, 70, 8, 4), 80), null);              // 4 줄 > maxRows 3
+  assert.equal(selSpan(S(5, 70, 8, 4), 80, { maxRows: 4 }), 10 + 160 + 5);
+  assert.equal(selSpan(S(0, 0, 40, 12), 80), null);             // Cmd+A
+  assert.equal(selSpan(S(0, 0, 0, 9), 80), 10);                 // 한 줄 0,0 은 전체 선택이 아니다
+  for (const c of [0, -1, 1.5, NaN, "80", null, undefined]) assert.equal(selSpan(S(1, 1, 1, 2), c), null, String(c));
+  assert.equal(selSpan(null, 80), null);
+  assert.equal(selSpan({ start: cell(1, 1) }, 80), null);
+  assert.equal(selSpan(S(1, -1, 1, 2), 80), null);
+  assert.equal(selSpan(S(1, 1, 1, 80), 80), null);              // 칸이 cols 밖
+});
+
+test("dcStep: 처음 · 주소 바뀜은 기준선만 — 있던 선택은 새 것이 아니다", () => {
+  const sel = S(3, 0, 3, 5);
+  let r = dcStep(null, { addr: "a", sel, now: 0 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel, now: 5000 });
+  assert.equal(r.fire, false, "처음 본 선택은 오래 머물러도 안 연다");
+  r = dcStep(r.state, { addr: "b", sel: S(1, 1, 1, 4), now: 6000 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "b", sel: S(1, 1, 1, 4), now: 9000 });
+  assert.equal(r.fire, false, "주소가 바뀐 터미널에 이미 있던 선택");
+});
+
+test("dcStep: 새 선택은 settleMs 머문 뒤 한 번만 · 바뀌면 시계 다시 · null 뒤 같은 선택은 다시", () => {
+  const sel = S(3, 0, 3, 5);
+  let r = dcStep(null, { addr: "a", sel: null, now: 0 });
+  r = dcStep(r.state, { addr: "a", sel, now: 100 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel, now: 499 });
+  assert.equal(r.fire, false, "399 ms");
+  r = dcStep(r.state, { addr: "a", sel, now: 500 });
+  assert.equal(r.fire, true);
+  r = dcStep(r.state, { addr: "a", sel, now: 900 });
+  assert.equal(r.fire, false, "같은 선택은 두 번 안 연다");
+  r = dcStep(r.state, { addr: "a", sel, now: 9999 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel: null, now: 10000 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel, now: 10100 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel, now: 10500 });
+  assert.equal(r.fire, true, "null 로 지운 뒤 같은 낱말을 다시");
+  // 변하면 시계가 다시 시작
+  r = dcStep(null, { addr: "a", sel: null, now: 0 });
+  r = dcStep(r.state, { addr: "a", sel: S(1, 0, 1, 3), now: 100 });
+  r = dcStep(r.state, { addr: "a", sel: S(1, 0, 1, 4), now: 450 });
+  r = dcStep(r.state, { addr: "a", sel: S(1, 0, 1, 4), now: 800 });
+  assert.equal(r.fire, false, "450 에 바뀌어 350 ms 만 머묾");
+  r = dcStep(r.state, { addr: "a", sel: S(1, 0, 1, 4), now: 850 });
+  assert.equal(r.fire, true);
+  // 설정값 settleMs
+  r = dcStep(null, { addr: "a", sel: null, now: 0 }, { settleMs: 50 });
+  r = dcStep(r.state, { addr: "a", sel: S(1, 0, 1, 4), now: 10 }, { settleMs: 50 });
+  r = dcStep(r.state, { addr: "a", sel: S(1, 0, 1, 4), now: 60 }, { settleMs: 50 });
+  assert.equal(r.fire, true);
+});
+
+test("dcStep: 끌기 흐름은 끝 값이 늘다가 멈춘 뒤 한 번만 fire", () => {
+  let r = dcStep(null, { addr: "a", sel: null, now: 0 });
+  let fires = 0, now = 0;
+  for (let c = 0; c < 12; c++) { now += 100; r = dcStep(r.state, { addr: "a", sel: S(2, 0, 2, c), now }); if (r.fire) fires++; }
+  assert.equal(fires, 0, "끄는 동안");
+  for (let i = 0; i < 20; i++) { now += 100; r = dcStep(r.state, { addr: "a", sel: S(2, 0, 2, 11), now }); if (r.fire) fires++; }
+  assert.equal(fires, 1);
+});
+
+// 한 줄 선택: row 의 col0 에서 시작해 글의 칸 수만큼.
+const one = (row, col0, str) => S(row, col0, row, col0 + cellWidth(str) - 1);
+const TXT = "ls\n  /w/proj/보고서.pdf\nsee /w/proj/src/a.ts:42 now\n";
+
+test("dcPick: 터미널 글자에 있는 경로 → 그 경로 · 한글 이름 · 끝 개행", () => {
+  const k = "/w/proj/보고서.pdf";
+  assert.equal(dcPick({ clip: k, sel: one(1, 2, k), cols: 80, text: TXT }), k);
+  assert.equal(dcPick({ clip: k + "\n", sel: one(1, 2, k), cols: 80, text: TXT }), k);
+  assert.equal(dcPick({ clip: k + "\r\n", sel: one(1, 2, k), cols: 80, text: TXT }), k);
+  assert.equal(dcPick({ clip: k + "\n\n", sel: one(1, 2, k), cols: 80, text: TXT }), null, "개행은 하나만 뗀다");
+});
+
+test("dcPick: 터미널에는 a.ts:42 · 선택한 낱말은 :줄 없이", () => {
+  const a = "/w/proj/src/a.ts";
+  assert.equal(dcPick({ clip: a, sel: one(2, 4, a), cols: 80, text: TXT }), a);
+});
+
+test("dcPick: 여러 줄 선택 — 클립보드에 낀 개행을 뺀다(터미널 글자에는 이어진 한 글)", () => {
+  const long = "/w/proj/" + "d".repeat(70) + "/x.txt";                  // 84 칸
+  const text = `echo\n${long}\n`;
+  const sel = S(4, 4, 5, 7);                                            // 76 + 8 = 84
+  assert.equal(selSpan(sel, 80), 84);
+  assert.equal(dcPick({ clip: long.slice(0, 76) + "\n" + long.slice(76), sel, cols: 80, text }), long);
+  assert.equal(dcPick({ clip: long.slice(0, 76) + "\r\n" + long.slice(76) + "\n", sel, cols: 80, text }), long);
+  assert.equal(dcPick({ clip: long, sel, cols: 80, text }), long, "개행 없이 와도 같다");
+});
+
+test("dcPick: 칸 수가 안 맞으면 null(낡은 클립보드 · 와이드 글자 줄바꿈 어긋남)", () => {
+  const k = "/w/proj/보고서.pdf";
+  assert.equal(dcPick({ clip: k, sel: S(1, 2, 1, 2 + k.length - 1), cols: 80, text: TXT }), null, "글자 수로 세면 어긋난다");
+  assert.equal(dcPick({ clip: k, sel: one(1, 2, k), cols: 0, text: TXT }), null);
+  assert.equal(dcPick({ clip: k, sel: null, cols: 80, text: TXT }), null);
+  assert.equal(dcPick({ clip: k, sel: S(0, 0, 9, 3), cols: 80, text: TXT }), null, "전체 선택");
+});
+
+test("dcPick: 터미널에 없는 경로 · 비밀번호 같은 글 · 낱말이 둘 · 너무 긴 글 → null", () => {
+  const stale = "/w/other/secret.pdf";                                   // 클립보드에만 있는 경로
+  assert.equal(dcPick({ clip: stale, sel: one(1, 2, stale), cols: 80, text: TXT }), null);
+  const pw = "hunter2-Xk9!pass";
+  assert.equal(dcPick({ clip: pw, sel: one(1, 2, pw), cols: 80, text: TXT + pw }), null, "후보가 아니다");
+  const pw2 = "p4ss.txt";                                               // 파일 이름처럼 보여도 터미널에 없으면 null
+  assert.equal(dcPick({ clip: pw2, sel: one(1, 2, pw2), cols: 80, text: TXT }), null);
+  const two = "/w/a.pdf /w/b.pdf";
+  assert.equal(dcPick({ clip: two, sel: one(1, 2, two), cols: 80, text: `${two}\n` }), null, "후보가 둘");
+  assert.equal(dcPick({ clip: "", sel: S(1, 2, 1, 2), cols: 80, text: TXT }), null);
+  assert.equal(dcPick({ clip: "\n", sel: S(1, 2, 1, 2), cols: 80, text: TXT }), null);
+  assert.equal(dcPick({ clip: null, sel: S(1, 2, 1, 2), cols: 80, text: TXT }), null);
+  const big = "/" + "z".repeat(1100) + ".txt";
+  assert.equal(dcPick({ clip: big, sel: S(0, 0, 2, 79), cols: 80, text: big }), null);
+});
+
+test("selSpan: 0,0 에서 시작하는 여러 줄은 null(전체 선택 의심) · 1 열 시작은 계산", () => {
+  assert.equal(selSpan(S(0, 0, 1, 5), 80), null);
+  assert.equal(selSpan(S(0, 0, 2, 5), 80), null);
+  assert.equal(selSpan(S(0, 1, 1, 5), 80), 85);                 // (80-1) + 5 + 1
+});
+
+test("dcPick: 긴 목록 — 20 번째보다 오래된 코드 파일도 터미널 사본으로 찾는다", () => {
+  const text = Array.from({ length: 30 }, (_, i) => `edited /w/proj/f${String(i).padStart(2, "0")}.ts`).join("\n") + "\n";
+  const p = "/w/proj/f00.ts";
+  assert.equal(dcPick({ clip: p, sel: one(0, 7, p), cols: 80, text }), p);
+  assert.ok(!scanText(text).cands.includes(p), "기본 상한이면 빠지는 자리");
+});
+
+test("cellWidth · dcPick: 한글 NFD(자모 분해)도 NFC 와 같은 칸 수", () => {
+  const k = "/w/proj/" + "한글.md".normalize("NFD");
+  assert.equal(cellWidth(k), 8 + 4 + 3);
+  assert.equal(cellWidth("한글".normalize("NFD")), cellWidth("한글"));
+  assert.equal(dcPick({ clip: k, sel: one(1, 2, k), cols: 80, text: `ls\n  ${k}\n` }), k);
+});
+
+test("dcPick: 문장 끝 장식(`.`)이 붙은 한 경로는 열고 · 공백이 든 선택은 안 연다", () => {
+  const text = "Created docs/plan.md.\n";
+  assert.equal(dcPick({ clip: "docs/plan.md.", sel: S(0, 8, 0, 20), cols: 80, text }), "docs/plan.md");
+  assert.equal(selSpan(S(0, 8, 0, 20), 80), 13);
+  const sp = "see docs/plan.md";
+  assert.equal(dcPick({ clip: sp, sel: one(0, 0, sp), cols: 80, text: "see docs/plan.md\n" }), null);
+});
+
+const S_KEY = selKey(S(1, 0, 1, 4));
+test("dcStep: 주소 바뀜 + prevKey 가 null(앞 틱엔 선택 없음) + 선택 있음 → 첫 틱 fire 없음 · settleMs 뒤 한 번", () => {
+  let r = dcStep({ addr: "a", key: null, since: 0, fired: false }, { addr: "b", sel: S(1, 0, 1, 4), now: 100, prevKey: null });
+  assert.equal(r.fire, false, "첫 틱");
+  assert.equal(r.state.fired, false);
+  r = dcStep(r.state, { addr: "b", sel: S(1, 0, 1, 4), now: 300, prevKey: S_KEY });
+  assert.equal(r.fire, false, "200 ms 만 머묾");
+  r = dcStep(r.state, { addr: "b", sel: S(1, 0, 1, 4), now: 500, prevKey: S_KEY });
+  assert.equal(r.fire, true, "400 ms 머묾");
+  r = dcStep(r.state, { addr: "b", sel: S(1, 0, 1, 4), now: 900, prevKey: S_KEY });
+  assert.equal(r.fire, false, "한 번뿐");
+});
+
+test("dcStep: 주소 바뀜 + prevKey 가 지금 key 와 같음(키보드 포커스 이동 · 원래 있던 선택) → fire 없음", () => {
+  let r = dcStep({ addr: "a", key: null, since: 0, fired: false }, { addr: "b", sel: S(1, 0, 1, 4), now: 100, prevKey: S_KEY });
+  assert.equal(r.state.fired, true);
+  for (const now of [500, 900, 1500]) { r = dcStep(r.state, { addr: "b", sel: S(1, 0, 1, 4), now, prevKey: S_KEY }); assert.equal(r.fire, false); }
+});
+
+test("dcStep: 주소 바뀜 + prevKey undefined(모름) → 옛 동작(기준선 · fire 없음)", () => {
+  let r = dcStep({ addr: "a", key: null, since: 0, fired: false }, { addr: "b", sel: S(1, 0, 1, 4), now: 100 });
+  assert.equal(r.state.fired, true);
+  for (const now of [500, 900]) { r = dcStep(r.state, { addr: "b", sel: S(1, 0, 1, 4), now }); assert.equal(r.fire, false); }
+});
+
+test("dcPick: 이름이 더 이어지면(allowlist 밖) null — data.jsonl 이 data.json 으로 열리지 않는다", () => {
+  for (const [name, short] of [["data.jsonl", "data.json"], ["notes.mdx", "notes.md"], ["a.json5", "a.json"], ["a.md.bak", "a.md"], ["x.json.gz", "x.json"]]) {
+    const text = `ls\n${short}\n${name}\n`;                                // 짧은 이름도 터미널에 있다 — 회귀가 보이게
+    assert.equal(dcPick({ clip: name, sel: one(2, 0, name), cols: 80, text }), null, name);
+  }
+});
+
+test("dcPick: 장식은 허용 — 앞 ** · 뒤 #L12 · 끝 .", () => {
+  const b = "**docs/plan.md**";
+  assert.equal(dcPick({ clip: b, sel: one(1, 0, b), cols: 80, text: `x\n${b}\n` }), "docs/plan.md");
+  const l = "/w/a.md#L12";
+  assert.equal(dcPick({ clip: l, sel: one(1, 0, l), cols: 80, text: `x\n${l}\n` }), "/w/a.md");
+  const d = "docs/plan.md.";
+  assert.equal(dcPick({ clip: d, sel: one(1, 0, d), cols: 80, text: `x\n${d}\n` }), "docs/plan.md");
+});
+
+// protects=이름 뒤에 붙은 한글·일본어 조사와 CJK 괄호·줄 꼬리(#L12C3)가 장식으로 떼어져 그 이름이 열린다; fails_when=allowlist 가 조사·「」·C열을 거부해 null 이 되면 실패; no_claim=조사가 어떤 단어인지·문법은 안 본다
+test("dcPick: 붙은 조사 · CJK 괄호 · #L12C3 은 허용 — 이름만 연다", () => {
+  const cases = [["docs/plan.md를", "docs/plan.md"], ["보고서.pdf를", "보고서.pdf"], ["report.md에서", "report.md"], ["note.mdを", "note.md"], ["config.yamlを更新し", "config.yaml"],
+    ["「보고서.pdf」", "보고서.pdf"], ["a.md#L12C3", "a.md"], ["a.md#L1C2-L3C4", "a.md"], ["docs/plan.md를".normalize("NFD"), "docs/plan.md"]];
+  for (const [clip, want] of cases) {
+    const text = `x\n${clip}\n${want}\n`;
+    assert.equal(dcPick({ clip, sel: one(1, 0, clip), cols: 80, text }), want, clip);
+  }
+});
+
+// protects=이름이 라틴 글자·숫자·확장자·결합 부호로 이어지면 다른 파일이라 안 연다; fails_when=조사 허용이 넓어져 data.jsonl 이 data.json 으로 열리면 실패; no_claim=그 밖의 문자(키릴 등) 처리는 보장 안 함
+test("dcPick: 조사 허용에도 data.jsonl · notes.mdx · a.md.bak · x.json.gz · 결합 부호는 null", () => {
+  for (const [clip, short] of [["data.jsonl를", "data.json"], ["data.jsonl", "data.json"], ["notes.mdx", "notes.md"], ["a.md.bak", "a.md"], ["x.json.gz", "x.json"], ["a.md\u0301", "a.md"]]) {
+    const text = `x\n${short}\n${clip}\n`;
+    assert.equal(dcPick({ clip, sel: one(2, 0, clip), cols: 80, text }), null, clip);
+  }
+});
+
+// protects=한글·가나 한 글자 뒤에 아무 글이나 붙어도 짧은 이름이 열리던 구멍(data.json백업.gz → data.json)이 막혀 null; fails_when=꼬리가 [\s\S] 처럼 넓어지거나 한자 시작을 받으면 실패; no_claim=꼬리 안 한글·한자 단어의 뜻은 안 본다
+test("dcPick: 한글·가나 뒤에 다른 이름 조각이 이어지면 짧은 이름도 안 연다(null)", () => {
+  const cases = [["data.json백업.gz", "data.json"], ["plan.md를.bak", "plan.md"], ["a.md를.json.gz", "a.md"], ["/tmp/a.md를/b", "/tmp/a.md"],
+    ["a.md를=b", "a.md"], ["a.md를\u0301", "a.md"], ["a.md를\u202E", "a.md"], ["data.csv备份", "data.csv"]];
+  for (const [clip, short] of cases) {
+    const text = `x\n${short}\n${clip}\n`;                                // 짧은 이름도 터미널에 있다 — 잘못 열리면 보인다
+    assert.equal(dcPick({ clip, sel: one(2, 0, clip), cols: 80, text }), null, clip);
+  }
+});
+
+// protects=조사 뒤에 허용 밖 글자가 하나라도 오면 어떤 조사든 null; fails_when=꼬리에 ASCII·`/`·`=`·`-`·`_`·`~`·결합/제어/제로폭 문자가 새면 실패; no_claim=표의 글자 밖 문자는 보장 안 함
+test("dcPick: 조사(를·에서·を) × 금지 글자 표 — 모두 null", () => {
+  for (const p of ["를", "에서", "を"]) {
+    for (const c of ["b", "2", "/", "=", "-", "_", "~", "\u0301", "\u202E", "\u200B"]) {
+      const clip = `docs/plan.md${p}${c}x`;
+      const text = `x\ndocs/plan.md\n${clip}\n`;
+      assert.equal(dcPick({ clip, sel: one(2, 0, clip), cols: 80, text }), null, JSON.stringify(clip));
+    }
+  }
+});
+
+test("dcStep: cols 가 바뀌면 기준선(fire 없음) · 그 뒤 reflowMs 안의 key 변화도 기준선 · 지나면 정상", () => {
+  const a = S(3, 0, 3, 5), b = S(4, 0, 4, 5);
+  let r = dcStep(null, { addr: "a", sel: a, cols: 80, now: 0 });
+  r = dcStep(r.state, { addr: "a", sel: a, cols: 100, now: 100 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel: a, cols: 100, now: 5000 });
+  assert.equal(r.fire, false, "cols 바뀐 뒤 머물러도 안 연다");
+  // 줄바꿈 직후 key 변화
+  r = dcStep(null, { addr: "a", sel: a, cols: 80, now: 0 });
+  r = dcStep(r.state, { addr: "a", sel: a, cols: 100, now: 100 });
+  r = dcStep(r.state, { addr: "a", sel: b, cols: 100, now: 600 });
+  r = dcStep(r.state, { addr: "a", sel: b, cols: 100, now: 1500 });
+  assert.equal(r.fire, false, "reflowMs 안에 바뀐 key");
+  // reflowMs 뒤 key 변화는 정상
+  r = dcStep(null, { addr: "a", sel: a, cols: 80, now: 0 });
+  r = dcStep(r.state, { addr: "a", sel: a, cols: 100, now: 100 });
+  r = dcStep(r.state, { addr: "a", sel: b, cols: 100, now: 1100 });
+  assert.equal(r.fire, false);
+  r = dcStep(r.state, { addr: "a", sel: b, cols: 100, now: 1500 });
+  assert.equal(r.fire, true, "settle 뒤 fire");
+  // cols 모름 = 예전 동작
+  r = dcStep(null, { addr: "a", sel: null, now: 0 });
+  r = dcStep(r.state, { addr: "a", sel: a, now: 100 });
+  r = dcStep(r.state, { addr: "a", sel: a, now: 500 });
+  assert.equal(r.fire, true);
+});
+
+test("cellWidth: NFD 결합 탁점 · 성조 표시는 0 칸 — NFD 와 NFC 폭이 같다", () => {
+  assert.equal(cellWidth("デ.pdf"), 6);
+  assert.equal(cellWidth("デ.pdf".normalize("NFD")), cellWidth("デ.pdf".normalize("NFC")));
+  assert.equal(cellWidth("\u3099"), 0);
+  assert.equal(cellWidth("\u302a"), 0);
+});
+
+test("selKey: null → null · 정상 → r:c-r:c · 모양 틀림 → null", () => {
+  assert.equal(selKey(null), null);
+  assert.equal(selKey(S(1, 2, 3, 4)), "1:2-3:4");
+  assert.equal(selKey({ start: {}, end: {} }), null);
+  assert.equal(selKey({ start: cell(1, 2) }), null);
 });

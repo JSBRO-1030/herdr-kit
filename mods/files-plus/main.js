@@ -4,7 +4,7 @@
 // Windows 머신 폴더 읽기(PowerShell 길)는 뺐다 — 옮기기가 sh 로만 돈다.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, hc, readTextFile, watchFolder, theme, window, appHome, home, notify, openOverlay, closeOverlay, shared, setShared, props as modProps } from "herdr";
+import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, home, notify, openOverlay, closeOverlay, shared, setShared, props as modProps } from "herdr";
 import { makeTransfer, oneAtATime } from "./transfer.js";
 import { Preview, ResizeFrame, openPreviewWindow } from "./preview.js";
 import { dedupeNested, replaceGroupLines } from "./tree.js";
@@ -12,7 +12,7 @@ import { FileMenu, AskDialog } from "./ask-view.js";
 import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
-import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS } from "./termfiles.js";
+import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS, dcStep, dcPick, selSpan, selKey } from "./termfiles.js";
 import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
@@ -52,6 +52,8 @@ function termTarget(prev) {
 }
 // TF_ROWS = 보이는 줄 수(넘치면 스크롤) · TF_MAX = 목록 크기 · TF_POLL_MS = working 중 가벼운 다시 훑기 간격
 const TF_READ_MS = 5000, TF_LINES = 300, TF_TEXT = 64 * 1024, TF_DEBOUNCE = 800, TF_ROWS = 8, TF_MAX = 12, TF_POLL_MS = 10000;
+// 더블클릭 열기: 선택 시각부터 이 시간이 지나면 열지 않는다(느린 원격에서 늦게 뜬 미리보기가 키보드를 가져가지 않게)
+const DC_OPEN_MAX_MS = 4000;
 
 // [주의] hc 에는 timeout 옵션이 없다 → ms 안에 안 돌아오면 null(늦은 결과는 무시) — 안 그러면 tfBusy 가 안 풀려 줄이 멎는다. 실패도 null.
 function hcLimited(cx, args, ms = TF_READ_MS) {
@@ -201,6 +203,8 @@ export default class FilesPlus extends View {
     cx.timer.every(10000, cx => this.refresh(cx));
     // «터미널에 나온 파일» 줄: 상태는 this.tf* (스캔 시점 = 틱에서 key 변화 · 새로고침 단추 · 패널 열림 · working 중 10 s 가벼운 스캔)
     this.tfList = []; this.tfCollapsed = false; this.tfBusy = false; this.tfAgain = false; this.tfT = null; this.tfKey = undefined; this.tfWho = ""; this.tfTimer = null; this.tfPending = false; this.tfLastAt = 0; this.tfText = null; this.tfLive = null; this.tfOwed = false; this.tfUrgent = false; this.tfGen = 0; this.tfBusyAt = 0; this.tfBusyKind = "full"; this.tfStage = ""; this.tfAbandons = 0; this.tfAbandonRun = 0; this.tfLastAbandon = null; this.tfNotePrev = null; this.tfNoteAt = 0;   // tfBusyKind = 진행 중 스캔의 종류("light" | "full") · tfStage = 진행 중 스캔이 지금 기다리는 단계(read · scan · resolve · search · merge) · tfAbandons = 이번 삶에 버린 횟수 · tfAbandonRun = 연속으로 버린 횟수(끝난 스캔이 0 으로) · tfLastAbandon = 마지막으로 버린 스캔의 {stage, kind, age(초)} · tfGen = 스캔 세대(낡은 스캔은 아무것도 안 쓴다) · tfBusyAt = 진행 중 스캔의 시작 시각 · tfNotePrev · tfNoteAt = 마지막으로 쓴 진단 기록(at 뺀 객체)과 쓴 시각 · tfLive = 직전 틱의 {addr, status}(panes() 실시간) · tfOwed = working 이 끝났는데 아직 안 본 마지막 출력(빚) · tfUrgent = ⟳ 또는 터미널·폴더 바뀜으로 줄 선 전체 훑기(감시가 늘어난 기다림 대신 TF_STUCK_MS 를 쓴다)
+    // 터미널 더블클릭 → 미리보기: 상태는 this.dc* (tf* 와 따로 · 새 선택이 서면 앞 작업을 밀어낸다 · dcGen = 낡은 작업은 아무것도 안 한다 · dcOpened = 터미널마다 방금 연 파일 Map(addr → path) — 선택이 풀리거나 터미널이 사라질 때까지 같은 파일을 다시 안 연다 · dcSeen = 앞 틱 terminals() 의 주소→선택 key Map(포커스 없는 창 더블클릭 감지용 · 매 틱 갱신))
+    this.dcSt = null; this.dcGen = 0; this.dcOpened = new Map(); this.dcSeen = null;
     cx.timer.every(300, cx => this.inbox(cx));
   }
 
@@ -350,12 +354,69 @@ export default class FilesPlus extends View {
     } catch { /* 기록이 훑기를 막지 않게 */ }
   }
 
-  // 줄 클릭 → 미리보기(openPreview 와 같은 꼴 · 그 파일 하나). 터미널 출력만으로 저절로 열지 않는다.
-  openTermFile(abs) {
+  // 줄 클릭 → 미리보기(openPreview 와 같은 꼴 · 그 파일 하나). 터미널 출력만으로는 저절로 열지 않는다 — 사용자 동작(줄 클릭 · 터미널에서 낱말을 더블클릭해 고른 선택 → dcTick)만 연다.
+  // on = 그 파일이 있는 머신(줄 클릭은 눌린 터미널의 머신 · 더블클릭은 그 터미널을 고른 때의 머신).
+  openTermFile(abs, on = this.tfT?.on ?? null) {
     const i = abs.lastIndexOf("/"), name = abs.slice(i + 1), root = i > 0 ? abs.slice(0, i) : "/";
     if (!safeName(name)) return;
     this.previewDir = null;
-    this.previewId = openPreviewWindow({ mode: "preview", owner: this.owner, root, on: this.tfT?.on ?? null, space: this.context?.space, dir: "", files: [name], index: 0, mac: this.mac, viewer: this.viewer }, false);
+    this.previewId = openPreviewWindow({ mode: "preview", owner: this.owner, root, on, space: this.context?.space, dir: "", files: [name], index: 0, mac: this.mac, viewer: this.viewer }, false);
+  }
+
+  // 터미널에서 낱말을 더블클릭(= 마우스 선택) → 그 낱말이 터미널에 나온 파일 이름이면 미리보기. macOS 전용(클립보드 = pbpaste).
+  // 평소 틱은 입출력이 없다(terminals · focused · panes 만 · spaces 는 fire 때) — 선택이 400 ms 머물러 «새 선택» 이 될 때만 작업을 하나 띄운다.
+  // 클립보드 글은 터미널 글자에서 찾은 후보 중 하나를 «고르는 데만» 쓴다(dcPick). 클립보드에서만 온 글은 exec 로 가지 않는다 — exec 에는 상수 스크립트와 터미널 쪽 후보(cand)만 간다.
+  dcTick(cx) {
+    if (!this.mac || this.closed) return;
+    const ts = terminals();
+    const prevSeen = this.dcSeen;
+    this.dcSeen = new Map(ts.map(t => [t.address, selKey(t.selection ?? null)]));   // 이른 return 앞에서 갱신 — 패널·terminal.show 가 포커스여도 기억이 낡지 않게
+    for (const a of [...this.dcOpened.keys()]) if (this.dcSeen.get(a) == null) this.dcOpened.delete(a);   // 선택이 풀렸거나(null) 터미널이 사라졌다 → 같은 파일을 다시 열 수 있다(포커스 여부 무관)
+    const f = focused();
+    if (!f?.terminal) return;                                   // 터미널이 아님 · 상태는 그대로 둔다
+    const all = panes();
+    const own = f.pane ? all.find(p => p.pane === f.pane) : null;
+    if (own?.mod === NAME) return;                              // 이 패널이 눌림 · 상태는 그대로 둔다
+    if (f.shown && f.shown !== f.terminal) return;              // 선택은 보이는 쪽(terminal.show) 터미널 것 — 그 cwd 는 검증 못 한다 → 열지 않는다 · 상태는 그대로
+    const addr = f.terminal, sel = f.selection ?? null, now = Date.now();
+    const cols = ts.find(t => t.address === addr)?.cols;
+    const r = dcStep(this.dcSt, { addr, sel, cols, now, prevKey: prevSeen?.get(addr) });
+    this.dcSt = r.state;
+    if (!r.fire) return;
+    const space = spaces().find(s => s.active);
+    const on = terminalMachine(f, space, addr);
+    const cwd = all.find(p => p.terminal === addr)?.cwd || f.cwd || null;
+    const span = selSpan(sel, cols);
+    if (span === null || span > 1024 || !cwd) return;           // 칸 수를 모르거나 너무 길면 클립보드도 읽지 않는다
+    const gen = ++this.dcGen;                                   // 새 선택이 앞 작업을 밀어낸다 — 앞 작업은 이 순간부터 낡은 것
+    cx.spawn(async cx => {
+      try {
+        // [경고] 클립보드(믿을 수 없는 입력 · 비밀번호일 수 있음)는 저장 · 기록 · 진단 · exec 인자로 쓰지 않는다. dcPick 이 터미널 글자의 후보 중 하나를 고르는 데만 쓴다.
+        const c = await exec("/bin/sh", ["-c", "LC_ALL=en_US.UTF-8 /usr/bin/pbpaste | /usr/bin/head -c 4097"], { timeout: 2000 });
+        if (gen !== this.dcGen) return;
+        const clip = c?.code === 0 ? c.stdout : null;
+        if (typeof clip !== "string" || clip.length > 4096) return;
+        const r = await hcLimited(cx, ["read", addr, "--lines", String(TF_LINES), "--json"]);
+        if (gen !== this.dcGen) return;
+        if (!r || r.code !== 0) return;
+        let text = JSON.parse(r.stdout)?.text;
+        if (typeof text !== "string") return;
+        if (text.length > TF_TEXT) text = text.slice(-TF_TEXT);
+        const cand = dcPick({ clip, sel, cols, text });
+        if (cand === null) return;
+        const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand], { on, timeout: 10000 });
+        if (gen !== this.dcGen) return;
+        if (e.code !== 0) return;
+        const found = mergeResolved(e.stdout, null, { max: 2 });   // 정확히 하나일 때만 연다(찾기 단계 없음)
+        if (found.length !== 1) return;
+        if (this.dcOpened.get(addr) === found[0]) return;   // 방금 연 파일 — 선택이 풀릴 때까지 다시 안 연다(줄이 밀려 같은 선택이 새 선택처럼 보여도)
+        if (Date.now() - now > DC_OPEN_MAX_MS) return;       // 선택한 지 너무 오래 — 늦게 뜬 미리보기가 키보드를 가져가지 않게
+        const g = focused();
+        if (g?.terminal !== addr || selKey(g?.selection ?? null) !== selKey(sel) || this.closed || !this.lifeOk()) return;   // 그 선택이 아직 현재 선택일 때만
+        this.dcOpened.set(addr, found[0]);
+        this.openTermFile(found[0], on);
+      } catch { /* 조용히 */ }
+    });
   }
 
   // 머리줄 아래 칸: 터미널 대상이 있을 때(결과 0 이면 줄 없이 «· 0» 머리 + 새로고침만). 머리(접기 ▾/▸ · 개수 · 새로고침) + 줄(file 아이콘 · 이름 · 흐린 부모 폴더 이름).
@@ -951,6 +1012,7 @@ export default class FilesPlus extends View {
   inbox(cx) {
     if (this.closed || !this.lifeOk()) return;    // 낡은 삶은 요청함도 비우지 않는다(ack 를 올려 새 삶의 요청을 가로채지 않게)
     try { this.tfTick(cx); } catch (e) { try { this.tfNote({ phase: "tick-error", kind: "full", cands: 0, found: 0, err: errClass(e) }); } catch { /* 터미널 줄 오류가 요청함을 막지 않게 */ } }
+    try { this.dcTick(cx); } catch { /* 더블클릭 열기는 조용히 — 오류가 요청함을 막지 않게 */ }
     for (const from of SOURCES) {
       for (const req of drain(shared, setShared, this.owner, from)) {
         try { this.handle(req.action, req.args ?? {}, cx); } catch { /* 한 요청 오류가 나머지를 막지 않게 */ }

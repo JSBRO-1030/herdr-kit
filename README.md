@@ -59,7 +59,7 @@ sh ~/herdr-option/mods/install-mac.sh
 ```sh
 python3 -I skills/herdr-open/test_open.py                         # herdr-open 8개(앱·코어 없이)
 bash skills/herdr-team/test_update_clis.sh                         # 업데이트 판정 13개(가짜 CLI)
-node --test mods/tests/files-plus.test.mjs mods/tests/state.test.mjs   # files-plus 113개(1개는 Linux 에서 건너뜀)
+node --test mods/tests/files-plus.test.mjs mods/tests/state.test.mjs mods/tests/termfiles.test.mjs   # files-plus 194개(1개는 Linux 에서 건너뜀)
 bash -n skills/herdr-team/*.sh skills/session-rotate/session-rotate.sh install.sh
 skills/session-rotate/session-rotate.sh --dry-run --skip-prep-check   # hc 터미널 안의 claude 에서 — 게이트까지만
 ```

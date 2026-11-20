@@ -398,3 +398,99 @@ export function noteWrite(prev, next, now, lastAt, minGap = 15000) {
   if (JSON.stringify(prev) === JSON.stringify(next)) return false;
   return !Number.isFinite(now - lastAt) || now - lastAt >= minGap;
 }
+
+// ── 터미널에서 파일 이름을 더블클릭 → 미리보기 ──
+// 순수 함수만 둔다(입출력 없음). 호출은 main.js dcTick. 클립보드 글은 «터미널 글자에서 찾은 후보 중 하나를 고르는 데만» 쓴다 — 클립보드에서만 온 글은 exec 로 가지 않는다(dcPick 이 터미널의 사본을 돌려준다).
+
+// 화면 칸 수: 동아시아 와이드(한글 · CJK · 전각 …) 2 · 결합 문자 · 폭 없는 글 0 · 나머지 1.
+const WIDE = [[0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd]];
+const ZERO = [[0x0300, 0x036f], [0x200b, 0x200f], [0xfe00, 0xfe0f], [0x1ab0, 0x1aff], [0x20d0, 0x20ff], [0x1160, 0x11ff], [0xd7b0, 0xd7ff], [0x3099, 0x309a], [0x302a, 0x302f]];   // 일본어 탁점 결합(NFD) · 한자 성조 표시 포함
+const inRanges = (cp, rs) => { for (const [a, b] of rs) if (cp >= a && cp <= b) return true; return false; };
+export function cellWidth(s) {
+  let w = 0;
+  for (const ch of String(s ?? "")) {
+    const cp = ch.codePointAt(0);
+    w += inRanges(cp, ZERO) ? 0 : inRanges(cp, WIDE) ? 2 : 1;
+  }
+  return w;
+}
+
+const okCell = (c) => Number.isInteger(c?.row) && Number.isInteger(c?.col) && c.row >= 0 && c.col >= 0;
+// 시작 ≤ 끝 이 되게 순서를 바로잡는다. 잘못된 모양이면 null.
+function orderSel(sel) {
+  if (!okCell(sel?.start) || !okCell(sel?.end)) return null;
+  const a = sel.start, b = sel.end;
+  return a.row < b.row || (a.row === b.row && a.col <= b.col) ? { s: a, e: b } : { s: b, e: a };
+}
+
+// 선택된 칸 수(양끝 포함). 모르겠으면 null: 모양이 틀림 · cols 가 양의 정수가 아님 · 칸이 cols 밖 · maxRows 줄 넘음 · 전체 선택(Cmd+A: 0,0 에서 시작하는 여러 줄).
+export function selSpan(sel, cols, { maxRows = 3 } = {}) {
+  if (!Number.isInteger(cols) || cols <= 0) return null;
+  const o = orderSel(sel);
+  if (!o) return null;
+  const { s, e } = o;
+  if (s.col >= cols || e.col >= cols) return null;
+  const rows = e.row - s.row + 1;
+  if (rows > maxRows) return null;
+  if (rows === 1) return e.col - s.col + 1;
+  if (s.row === 0 && s.col === 0) return null;
+  return (cols - s.col) + (rows - 2) * cols + e.col + 1;
+}
+
+export const selKey = (sel) => (okCell(sel?.start) && okCell(sel?.end)
+  ? `${sel.start.row}:${sel.start.col}-${sel.end.row}:${sel.end.col}` : null);
+// 더블클릭 선택 감지(순수). state 는 호출 쪽이 들고 있다가 그대로 돌려준다 → { state, fire }. fire 는 같은 선택에서 많아야 한 번.
+//  · 처음 본 것은 기준선일 뿐이다(이미 있던 선택은 «새 것» 이 아니다). 주소가 바뀐 것도 기준선 — 단 prevKey(앞 틱 terminals() 에서 이 주소의 key · undefined = 모름)가 있고 지금 key 와 다르면
+//    포커스 이동과 같은 틱에 선택이 선 것(포커스 없는 창 더블클릭) → 새 선택으로 본다.
+//  · 앞 관찰과 다른 선택(null 뒤 · 다른 선택 · 아직 변하던 선택)이 새 것 → settleMs 동안 똑같이 머물러야 fire(바뀌면 시계 다시).
+//  · null 을 보면 fire 기억을 지운다 → 같은 낱말을 다시 더블클릭하면 또 fire.
+//  · 같은 주소에서 cols(칸 수)가 바뀌면 기준선(fire 없음) · 그 뒤 reflowMs 안의 key 변화도 기준선 — 줄바꿈이 다시 돼 선택이 밀린 것이지 새 더블클릭이 아니다. cols 를 모르면(undefined) 이 규칙은 없다.
+// [주의] 끌기(drag)와 더블클릭은 구별되지 않는다 — 끌다 놓아 settleMs 머문 선택도 fire 한다.
+export function dcStep(state, { addr, sel, cols, now, prevKey }, { settleMs = 400, reflowMs = 1000 } = {}) {
+  const key = selKey(sel);
+  if (!state) return { state: { addr, key, cols, since: now, fired: true }, fire: false };
+  if (state.addr !== addr) {
+    if (prevKey === undefined || prevKey === key) return { state: { addr, key, cols, since: now, fired: true }, fire: false };
+    return { state: { addr, key, cols, since: now, fired: false }, fire: false };
+  }
+  const c = cols ?? state.cols, ra = state.reflowAt;
+  const keep = ra === undefined ? {} : { reflowAt: ra };
+  // 칸 수가 바뀌면(창 크기) 터미널이 글을 다시 줄바꿈해 선택이 밀린다 → 새 선택이 아니라 기준선. 그 직후 reflowMs 동안 바뀌는 key 도 같다.
+  if (cols !== undefined && state.cols !== undefined && cols !== state.cols) return { state: { addr, key, cols, since: now, fired: true, reflowAt: now }, fire: false };
+  if (key === null) return { state: { addr, key: null, cols: c, since: now, fired: false, ...keep }, fire: false };
+  if (key !== state.key) {
+    if (ra !== undefined && now - ra < reflowMs) return { state: { addr, key, cols: c, since: now, fired: true, reflowAt: ra }, fire: false };
+    return { state: { addr, key, cols: c, since: now, fired: false, ...keep }, fire: false };
+  }
+  if (!state.fired && now - state.since >= settleMs) return { state: { ...state, cols: c, fired: true }, fire: true };
+  return { state, fire: false };
+}
+
+// dcPick allowlist(QuickJS: `u` 플래그·\p{} 없음 → \uXXXX 범위). pre = `*` · 여는 괄호/따옴표. post = `#L12C3` 꼬리 → 닫는 장식 → (한글·가나로 시작하는 조사 + 꼬리 한 부류).
+// 이어짐 시작 = 한글·가나만(ᄀ-ᅟ · ぀-ヿ · ㄰-㆏ · 가-힣 — 한자 시작 불허). 꼬리 = 한글 자모·가나·호환 자모·한자·완성형 한글·닫는 장식뿐. ASCII 글자·숫자·`/`·`=`·결합/제어 부호·공백은 어디서든 불허.
+const DC_PRE = /^[*「『«“‘【《〈]*$/;
+const DC_POST = /^(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)?[*?!。、.,;:」』»”’】》〉]*(?:[\u1100-\u115F\u3040-\u30FF\u3130-\u318F\uAC00-\uD7A3][\u1100-\u11FF\uD7B0-\uD7FF\u3040-\u30FF\u3130-\u318F\u4E00-\u9FFF\uAC00-\uD7A3*?!。、.,;:」』»”’】》〉]*)?$/;
+// 클립보드 + 선택 + 터미널 글자 → 풀어 볼 후보 글(없으면 null). 클립보드는 고르는 데만 쓴다:
+//  1) 정리(끝 개행 하나 · 여러 줄 선택이면 안쪽 개행도 뺀다 — 한 곳) · 비었거나 1024 자 넘으면 null
+//  2) cellWidth(clip) === selSpan 이어야 한다(다르면 선택과 클립보드가 다른 것 — 낡은 클립보드)
+//  3) 공백이 든 글은 null · scanText(clip) 후보가 정확히 하나(own)여야 한다. clip = 앞 `*` + own + 뒤 장식(`#L12C3` · `#L1-L3` · `*?!。、.,;:」`) · 앞 `*「` · 붙은 한글/가나/CJK 조사(`plan.md를`)뿐일 때만 통과(allowlist) — 그 밖의 앞뒤 글자(`.jsonl` · `.bak` · `.gz`)가 있으면 다른 이름이라 null
+//  4) 터미널 글자 전체(상한 없음)의 scanText(text).cands 에 own 이 그대로 있어야 한다 → 터미널 쪽 사본을 돌려준다
+// [경고] 클립보드는 믿을 수 없는 입력(비밀번호 · 다른 앱의 글)이다. 터미널 글자에 없는 글은 절대 돌려주지 않는다 — 반환값은 늘 터미널 글자에서 나온 후보다.
+export function dcPick({ clip, sel, cols, text }) {
+  if (typeof clip !== "string") return null;
+  const o = orderSel(sel);
+  if (!o) return null;
+  let w = clip.replace(/\r?\n$/, "");
+  if (o.e.row > o.s.row) w = w.replace(/\r?\n/g, "");
+  if (!w || w.length > 1024) return null;
+  const span = selSpan(sel, cols);
+  if (span === null || cellWidth(w) !== span) return null;
+  if (/\s/.test(w)) return null;
+  const own = scanText(w).cands;
+  if (own.length !== 1) return null;
+  const i = w.indexOf(own[0]);
+  if (i < 0) return null;
+  const pre = w.slice(0, i), post = w.slice(i + own[0].length);
+  if (!DC_PRE.test(pre) || !DC_POST.test(post)) return null;   // 장식 · 붙은 조사만 허용 — `data.jsonl` 처럼 이름이 라틴 글자·숫자로 더 이어지면 다른 파일
+  return scanText(text, { max: Infinity, maxCode: Infinity }).cands.find(c => c === own[0]) ?? null;
+}
