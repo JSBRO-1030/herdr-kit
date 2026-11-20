@@ -12,7 +12,7 @@ import { FileMenu, AskDialog } from "./ask-view.js";
 import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
-import { candidates, mergeResolved, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT } from "./termfiles.js";
+import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT } from "./termfiles.js";
 import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
@@ -50,7 +50,18 @@ function termTarget(prev) {
   // 머신은 location() 과 같은 규칙(terminalMachine). [주의] 로컬 터미널 안에서 `ssh` 로 들어간 서버의 파일은 이 규칙으로 알 수 없다 — 이름은 Mac 에서 푼다.
   return { addr, on: terminalMachine(f, space, addr), cwd: info?.cwd || f.cwd || null, status: info?.status ?? null };
 }
-const TF_READ_MS = 5000, TF_LINES = 300, TF_TEXT = 64 * 1024, TF_DEBOUNCE = 800, TF_ROWS = 8;
+// TF_ROWS = 보이는 줄 수(넘치면 스크롤) · TF_MAX = 목록 크기 · TF_POLL_MS = working 중 가벼운 다시 훑기 간격
+const TF_READ_MS = 5000, TF_LINES = 300, TF_TEXT = 64 * 1024, TF_DEBOUNCE = 800, TF_ROWS = 8, TF_MAX = 12, TF_POLL_MS = 10000;
+
+// [주의] hc 에는 timeout 옵션이 없다 → ms 안에 안 돌아오면 null(늦은 결과는 무시) — 안 그러면 tfBusy 가 안 풀려 줄이 멎는다. 실패도 null.
+function hcLimited(cx, args, ms = TF_READ_MS) {
+  return new Promise(resolve => {
+    let done = false;
+    const timer = cx.timer.after(ms, () => { if (!done) { done = true; resolve(null); } });
+    const end = v => { if (!done) { done = true; try { timer.cancel(); } catch { /* 이미 끝남 */ } resolve(v); } };
+    hc(args).then(end, () => end(null));
+  });
+}
 
 async function directory(path, on) {
   const script = 'n=0; for p in "$1"/* "$1"/.[!.]* "$1"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$1"';
@@ -188,8 +199,8 @@ export default class FilesPlus extends View {
     cx.timer.every(60000, cx => this.reap(cx));
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
-    // «터미널에 나온 파일» 줄: 상태는 this.tf* (스캔 시점 = 틱에서 key 변화 · 새로고침 단추 · 패널 열림. 주기 스캔 없음)
-    this.tfList = []; this.tfCollapsed = false; this.tfBusy = false; this.tfAgain = false; this.tfT = null; this.tfKey = undefined; this.tfWho = ""; this.tfTimer = null;
+    // «터미널에 나온 파일» 줄: 상태는 this.tf* (스캔 시점 = 틱에서 key 변화 · 새로고침 단추 · 패널 열림 · working 중 10 s 가벼운 스캔)
+    this.tfList = []; this.tfCollapsed = false; this.tfBusy = false; this.tfAgain = false; this.tfT = null; this.tfKey = undefined; this.tfWho = ""; this.tfTimer = null; this.tfPending = false; this.tfLastAt = 0; this.tfText = null; this.tfLive = null; this.tfOwed = false;   // tfLive = 직전 틱의 {addr, status}(panes() 실시간) · tfOwed = working 이 끝났는데 아직 안 본 마지막 출력(빚)
     cx.timer.every(300, cx => this.inbox(cx));
   }
 
@@ -198,7 +209,16 @@ export default class FilesPlus extends View {
     const t = termTarget(this.tfT);
     this.tfT = t;
     const key = t ? `${t.addr}|${t.on}|${t.cwd}|${t.status}` : "";
-    if (key === this.tfKey) return;
+    // [주의] t.status 는 이 패널이 눌려 있는 동안 낡는다(termTarget 이 앞 값을 그대로 둠) → 상태 판단은 panes() 의 실시간 값으로만 한다. key · tfT 에는 넣지 않는다(상태 뒤집힘이 전체 스캔으로 줄을 바꾸지 않게).
+    const live = t ? panes().find(p => p.terminal === t.addr)?.status ?? null : null;
+    // 같은 터미널에서 working 이 끝났으면 빚: 이 패널이 눌려 있으면 key 가 안 바뀌고 10 s 폴링도 working 이 아니라 멈춰, 마지막 출력을 놓친다 → 한 번 더 가볍게 본다.
+    if (t && endedWorking(this.tfLive, { addr: t.addr, status: live })) this.tfOwed = true;
+    this.tfLive = t ? { addr: t.addr, status: live } : null;
+    if (key === this.tfKey) {
+      // 에이전트는 몇 시간씩 working 이라 key 가 안 바뀐다 → 10 s 마다 가볍게 다시 본다(직접 풀기만 · find 는 절대 안 돈다). 빚이 있으면 주기를 건너뛰고 바로(진행 중이면 다음 틱에 다시).
+      if (t && !this.tfBusy && !this.tfPending && (this.tfOwed || (Date.now() - this.tfLastAt >= TF_POLL_MS && live === "working"))) this.tfScan(cx, true);
+      return;
+    }
     const first = this.tfKey === undefined, who = t ? `${t.addr}|${t.on}|${t.cwd}` : "";
     if (who !== this.tfWho) this.tfSet([], cx);       // 다른 터미널·폴더의 목록을 새 스캔 전까지 보이지 않는다(상태만 바뀐 경우는 그대로 둔다)
     this.tfWho = who; this.tfKey = key;
@@ -207,7 +227,8 @@ export default class FilesPlus extends View {
 
   tfSchedule(cx, ms) {
     try { this.tfTimer?.cancel(); } catch { /* 이미 끝남 */ }
-    this.tfTimer = cx.timer.after(ms, cx => this.tfScan(cx));
+    this.tfPending = true;
+    this.tfTimer = cx.timer.after(ms, cx => { this.tfPending = false; this.tfScan(cx); });
   }
 
   tfSet(list, cx) {
@@ -216,46 +237,47 @@ export default class FilesPlus extends View {
   }
 
   // 스캔: 터미널 글자(hc read) → 후보 → 그 머신에서 진짜 있는 파일(sh). 한 번에 하나(진행 중이면 끝난 뒤 한 번 더). 시작한 key 가 그대로일 때만 반영한다.
-  // 실패(hc 오류 · sh 오류 · 시간 초과)는 줄을 비우고 조용히 — 다음 스캔에서 다시.
-  tfScan(cx) {
+  // 전체 스캔 실패(hc 오류 · sh 오류 · 시간 초과)는 줄을 비우고 조용히 — 다음 스캔에서 다시.
+  // light(10 s 틱 · working 중): 글이 앞 스캔과 같으면 아무것도 안 한다 · 다르면 직접 풀기만(find 없음) · 앞 목록 뒤에 잇는다 · 실패해도 목록을 그대로 둔다.
+  tfScan(cx, light = false) {
     if (this.closed) return;
-    if (this.tfBusy) { this.tfAgain = true; return; }
+    if (this.tfBusy) { if (!light) this.tfAgain = true; return; }
+    this.tfOwed = false;                      // 스캔이 실제로 시작될 때만 빚을 지운다(전체 스캔도 빚을 덮는다)
     const t = this.tfT, key = this.tfKey;
-    if (!t?.cwd) { this.tfSet([], cx); return; }
+    if (!t?.cwd) { this.tfLastAt = Date.now(); this.tfSet([], cx); return; }
     this.tfBusy = true;
     cx.spawn(async cx => {
-      let list = [];
+      let list = [], keep = false;
       try {
-        // [주의] hc 에는 timeout 옵션이 없다 → 5 s 안에 안 돌아오면 포기(늦은 결과는 무시) — 안 그러면 tfBusy 가 안 풀려 줄이 멎는다.
-        const r = await new Promise(resolve => {
-          let done = false;
-          const timer = cx.timer.after(TF_READ_MS, () => { if (!done) { done = true; resolve(null); } });
-          hc(["read", t.addr, "--lines", String(TF_LINES), "--json"]).then(
-            v => { if (!done) { done = true; try { timer.cancel(); } catch { /* 이미 끝남 */ } resolve(v); } },
-            () => { if (!done) { done = true; try { timer.cancel(); } catch { /* 이미 끝남 */ } resolve(null); } });
-        });
+        const r = await hcLimited(cx, ["read", t.addr, "--lines", String(TF_LINES), "--json"]);
         if (!r || r.code !== 0) throw new Error("hc read");
         let text = JSON.parse(r.stdout)?.text;
         if (typeof text !== "string") throw new Error("no text");
         // [주의] 글자(UTF-16) 수로 자른다 — 바이트로는 최대 ~192 KiB. 터미널 글자는 믿을 수 없는 입력(이름은 위치 인자로만 sh 에 넘긴다).
         if (text.length > TF_TEXT) text = text.slice(-TF_TEXT);
-        const cands = candidates(text);
-        if (cands.length) {
-          const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, t.cwd, ...cands], { on: t.on, timeout: 10000 });
-          if (e.code !== 0) throw new Error("resolve");
-          list = mergeResolved(e.stdout, null, { max: TF_ROWS });
-          // 2단계: 직접 못 푼 상대 이름만 find 한 번. 실패 · 시간 초과면 1단계 결과만 쓴다.
-          const names = unresolved(e.stdout);
-          if (names.length) {
-            try {
-              const f = await exec("sh", ["-c", SEARCH_SCRIPT, NAME, t.cwd, ...names], { on: t.on, timeout: 10000 });
-              if (f.code === 0) list = mergeResolved(e.stdout, f.stdout, { max: TF_ROWS });
-            } catch { /* 1단계 결과 유지 */ }
+        if (light && text === this.tfText) keep = true;
+        else {
+          const root = t.cwd;
+          const { cands, guesses } = scanText(text);
+          if (cands.length) {
+            const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, root, ...cands], { on: t.on, timeout: 10000 });
+            if (e.code !== 0) throw new Error("resolve");
+            list = mergeResolved(e.stdout, null, { max: TF_MAX });
+            // 2단계(전체 스캔만): 직접 못 푼 상대 이름만 find 한 번. 줄 잇기 추측(guesses)은 넘기지 않는다. 실패 · 시간 초과면 1단계 결과만 쓴다.
+            const names = light ? [] : unresolved(e.stdout, { skip: guesses });
+            if (names.length) {
+              try {
+                const f = await exec("sh", ["-c", SEARCH_SCRIPT, NAME, root, ...names], { on: t.on, timeout: 10000 });
+                if (f.code === 0) list = mergeResolved(e.stdout, f.stdout, { max: TF_MAX });
+              } catch { /* 1단계 결과 유지 */ }
+            }
           }
+          if (light) list = mergeLight(list, this.tfList, TF_MAX);
+          this.tfText = text;
         }
-      } catch { list = []; }
-      this.tfBusy = false;
-      if (!this.closed && this.tfKey === key) this.tfSet(list, cx);
+      } catch { if (light) keep = true; else { list = []; this.tfText = null; } }
+      this.tfBusy = false; this.tfLastAt = Date.now();
+      if (!keep && !this.closed && this.tfKey === key) this.tfSet(list, cx);
       if (this.tfAgain && !this.closed) { this.tfAgain = false; this.tfScan(cx); }
     });
   }

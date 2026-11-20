@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, mkdir, rm, realpath, symlink, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { candidates, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, TERM_EXTS } from "../files-plus/termfiles.js";
+import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS } from "../files-plus/termfiles.js";
 
 const base = await realpath(await mkdtemp(join(process.env.TMPDIR || tmpdir(), "termfiles-")));
 after(() => rm(base, { recursive: true, force: true }));
@@ -96,8 +96,8 @@ test("candidates: max 개까지만", () => {
 });
 
 test("candidates: 확장자 목록 밖 · 이름 없는 확장자 · 대소문자 · 절대 경로", () => {
-  // protects=목록 밖(.bak .sh) 과 `.pdf` 만 있는 토큰은 안 나오고 대문자 확장자는 나온다; fails_when=.sh 가 나오거나 REPORT.PDF 가 빠지면 실패; no_claim=TERM_EXTS 전체 목록은 고정하지 않는다
-  assert.deepEqual(candidates("x.sh y.bak .pdf"), []);
+  // protects=목록 밖(.bak .exe) 과 `.pdf` 만 있는 토큰은 안 나오고 대문자 확장자는 나온다; fails_when=.exe 가 나오거나 REPORT.PDF 가 빠지면 실패; no_claim=TERM_EXTS 전체 목록은 고정하지 않는다(.sh 는 코드 확장자로 들어와 아래 시험이 다룬다)
+  assert.deepEqual(candidates("x.exe y.bak .pdf"), []);
   assert.deepEqual(candidates("REPORT.PDF"), ["REPORT.PDF"]);
   assert.deepEqual(candidates("/a/b/c.docx ~/n.md"), ["~/n.md", "/a/b/c.docx"]);
   assert.ok(TERM_EXTS.has("pdf") && TERM_EXTS.has("heic") && TERM_EXTS.has("md") && TERM_EXTS.has("toml") && !TERM_EXTS.has("bak"));
@@ -342,4 +342,161 @@ test("trimTail: 점 · 콜론이 긴 토큰도 선형 시간 · 꼬리 규칙은
   assert.equal(trimTail("x.pdf" + ".".repeat(1_000_000)), "x.pdf");
   assert.equal(trimTail("x.pdf" + ":1".repeat(200_000)), "x.pdf");
   assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+});
+
+// ── 에이전트 화면(Claude Code · Codex · Gemini CLI) · 코드 확장자 · 줄 잇기 ──
+const has = (c, ...names) => names.every(n => c.includes(n));
+
+test("candidates: Claude Code 꼴 — ⏺ Write(…) · ⎿ Wrote … · ⏺ Update(…)", () => {
+  // protects=⏺ ⎿ 장식과 괄호가 경계라 경로가 그대로 나온다; fails_when=⏺/⎿ 가 토큰에 붙거나 Update(src/app.py) 의 py 가 빠지면 실패; no_claim=나오는 순서의 세부는 최근(아래)이 먼저라는 것만 본다
+  const c = candidates(["⏺ Write(report/summary.pdf)", "  ⎿  Wrote 12 lines to report/summary.pdf", "⏺ Update(src/app.py)"].join("\n"));
+  assert.deepEqual(c, ["src/app.py", "report/summary.pdf"]);
+});
+
+test("candidates: Claude Bash 줄바꿈(들여쓴 이음 줄 · 토큰 중간에서 잘림) → 이은 후보는 guesses", () => {
+  // protects=잘린 경로가 위 줄 끝 + 아래 줄 머리로 이어져 나오고 추측으로 표시된다; fails_when=이은 후보가 없거나 guesses 에 없으면 실패(찾기로 새면 안 된다); no_claim=단어 경계 줄바꿈과 구별되지 않는다(추측일 뿐)
+  const text = ["⏺ Bash(cat docs/notes/long/dir/mem", "      o_final.md)"].join("\n");
+  const r = scanText(text);
+  assert.ok(r.cands.includes("docs/notes/long/dir/memo_final.md"), r.cands.join("|"));
+  assert.ok(r.guesses.has("docs/notes/long/dir/memo_final.md"));
+  assert.ok(r.cands.includes("o_final.md") && !r.guesses.has("o_final.md"));
+  // 세 줄 이음: 가운데 줄이 토큰 하나
+  const t3 = ["⏺ Bash(cat docs/notes/lo", "      ng/di", "      r/memo.md)"].join("\n");
+  const r3 = scanText(t3);
+  assert.ok(r3.guesses.has("docs/notes/long/dir/memo.md"), r3.cands.join("|"));
+});
+
+test("candidates: Gemini 상자 줄바꿈 — │ … │ 안에서 이어진다", () => {
+  // protects=│ 테두리가 경계 · 이음 둘 다에서 벗겨져 경로가 이어진다; fails_when=docs/very/long/path/guide.md 가 없거나 추측 표시가 없으면 실패; no_claim=✓ 같은 상태 글자는 후보에 영향 없음
+  const r = scanText(["│ ✓  ReadFile docs/very/long/pa │", "│ th/guide.md │"].join("\n"));
+  assert.ok(r.cands.includes("docs/very/long/path/guide.md"), r.cands.join("|"));
+  assert.ok(r.guesses.has("docs/very/long/path/guide.md"));
+});
+
+test("candidates: Codex 꼴 — • Edited · └ Read · 백틱 · #L · :줄-줄 · ─ 구분선", () => {
+  // protects=줄 위치 꼬리(:42 · #L10-L20 · :12-20)와 • └ ─ 장식이 이름에서 빠진다; fails_when=꼬리가 남거나 main.rs / lib.rs 가 빠지면 실패; no_claim=`(+3 -1)` 같은 통계는 후보가 아니다
+  const text = ["• Edited src/app.ts (+3 -1)", "  └ Read main.rs, lib.rs", "`src/app.ts:42`", "docs/guide.md#L10-L20", "src/a.ts:12-20", "─ Worked for 1m 20s ─"].join("\n");
+  const c = candidates(text);
+  assert.ok(has(c, "src/app.ts", "main.rs", "lib.rs", "docs/guide.md", "src/a.ts"), c.join("|"));
+  assert.ok(!c.some(x => /[:#]/.test(x)), c.join("|"));
+});
+
+test("trimTail: #LN · #LN-LM · #LNCM · #LNCM-LNCM · :N-M", () => {
+  // protects=깃허브 · 에디터식 줄 위치 꼬리가 모두 빠진다; fails_when=꼬리가 남거나 a-12 같은 이름 일부를 잘못 떼면 실패; no_claim=`#` 뒤가 L 없는 숫자(#12)는 줄 위치로 보지 않는다
+  for (const tail of ["#L10", "#L10-L20", "#L10C5", "#L10C5-L12C8", "#L10-20", ":12-20", ":12", ":12:3"]) assert.equal(trimTail(`a/b.md${tail}`), "a/b.md", tail);
+  assert.equal(trimTail("a-12"), "a-12");
+  assert.equal(trimTail("a.md#12"), "a.md#12");
+  const t0 = Date.now();
+  assert.equal(trimTail("x.md" + "#L1".repeat(100_000)), "x.md");
+  assert.ok(Date.now() - t0 < 1000);
+});
+
+test("candidates: « » 「 」 · 끝 ? ! · 굵게 ** 장식", () => {
+  // protects=묶음표 · 굵게 · 끝 문장부호가 이름에서 떨어진다; fails_when=report.pdf?·STATE.md 가 후보에서 빠지면 실패; no_claim=`?` 가 가운데 든 이름은 글롭으로 계속 버린다
+  const c = candidates("«report.pdf» 「보고서.pdf」 report.pdf? **STATE.md** notes.md!");
+  assert.ok(has(c, "report.pdf", "보고서.pdf", "STATE.md", "notes.md"), c.join("|"));
+  assert.ok(!c.some(x => /[*?!«」]/.test(x)));
+  assert.deepEqual(candidates("src/*.ts *.test.ts **/a.md a?b.md"), []);
+});
+
+test("candidates: URL 은 버리고 file:// 은 남긴다", () => {
+  // protects=https://… 가 후보 · 찾기 자리를 먹지 않는다; fails_when=URL 의 .md 가 후보로 나오거나 file:// 이 빠지면 실패; no_claim=URL 안 경로의 파일 여부는 보지 않는다
+  assert.deepEqual(candidates("https://example.com/docs/readme.md"), []);
+  assert.deepEqual(candidates("see https://example.com/a.pdf and file:///tmp/proj/a.md"), ["/tmp/proj/a.md"]);
+});
+
+test("candidates: 코드 확장자는 들어오고 .env 는 빠진다 · 영숫자가 붙으면 경계가 아니다", () => {
+  // protects=CODE_EXTS 가 TERM_EXTS 에 들어가고 한 글자 확장자는 c · h 뿐이다; fails_when=src/app.py 가 없거나 .env 가 나오거나 x.config 가 x.conf 로 잘리면 실패; no_claim=목록 전체는 고정하지 않는다
+  assert.ok(CODE_EXTS.has("py") && CODE_EXTS.has("ts") && TERM_EXTS.has("sh") && TERM_EXTS.has("py"));
+  assert.ok([...CODE_EXTS].every(e => e.length > 1 || e === "c" || e === "h"));
+  assert.deepEqual(candidates("src/app.py .env x.config a.class"), ["src/app.py"]);
+  assert.deepEqual(candidates("run.sh main.c lib.h"), ["lib.h", "main.c", "run.sh"]);
+});
+
+test("candidates: 줄 끝이 평범한 단어면 이은 후보를 만들지 않는다", () => {
+  // protects=«다음은» + «docs/a.md» 같은 문장에서 가짜 이음이 안 생긴다; fails_when=guesses 가 비어 있지 않으면 실패; no_claim=문장 끝 `.` 로 끝나는 줄은 이어 본다(추측일 뿐)
+  const r = scanText("다음은\n  docs/a.md");
+  assert.deepEqual(r.cands, ["docs/a.md"]);
+  assert.equal(r.guesses.size, 0);
+  // 이미 끝난 이름(확장자로 끝남) 뒤에서는 이어 보지 않는다 — 파일 목록 줄이 서로 붙지 않게
+  assert.equal(scanText("src/a.ts\nsrc/b.ts").guesses.size, 0);
+});
+
+test("unresolved: skip 에 든 이름(추측)은 찾기 대상에서 빠진다", () => {
+  // protects=이은 추측이 SEARCH_SCRIPT 로 가지 않는다; fails_when=skip 이름이 나오거나 skip 이 max 를 먹으면 실패; no_claim=skip 이 없을 때는 기존과 같다
+  const out = "?a.md\0?guess/x.md\0?b.md\0";
+  assert.deepEqual(unresolved(out), ["a.md", "guess/x.md", "b.md"]);
+  assert.deepEqual(unresolved(out, { skip: new Set(["guess/x.md"]) }), ["a.md", "b.md"]);
+  assert.deepEqual(unresolved(out, { skip: new Set(["guess/x.md"]), max: 2 }), ["a.md", "b.md"]);
+});
+
+test("이은 경로: RESOLVE_SCRIPT 가 임시 폴더에서 직접 푼다", async () => {
+  // protects=잘려 이어진 경로가 실제 파일로 풀린다(직접 풀기만); fails_when=이은 후보가 없거나 파일로 안 풀리면 실패; no_claim=찾기(find)는 쓰지 않는다
+  const d = await fresh(); await touch(join(d, "docs/notes/long/dir/memo_final.md"));
+  const r0 = scanText("⏺ Bash(cat docs/notes/long/dir/mem\n      o_final.md)");
+  const r = await sh(RESOLVE_SCRIPT, d, r0.cands);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.paths, [join(d, "docs/notes/long/dir/memo_final.md")]);
+});
+
+test("pickRows: 넘치면 문서를 먼저 · 남는 자리에 코드 · 원래 순서", () => {
+  // protects=코드 줄이 많아도 오래된 문서 줄이 남는다; fails_when=문서가 밀려나거나 순서가 바뀌면 실패; no_claim=코드끼리는 앞(최근)이 우선이라는 것까지만
+  const code = Array.from({ length: 10 }, (_, i) => `/p/c${i}.py`);
+  const list = [...code.slice(0, 6), "/p/old1.pdf", ...code.slice(6), "/p/old2.md"];
+  const out = pickRows(list, 8);
+  assert.equal(out.length, 8);
+  assert.ok(out.includes("/p/old1.pdf") && out.includes("/p/old2.md"));
+  assert.deepEqual(out, list.filter(p => out.includes(p)));
+  assert.equal(pickRows(list, 99), list);
+  assert.equal(mergeResolved(list.join("\0"), null, { max: 8 }).length, 8);
+});
+
+test("candidates: 상한 — 일반 40 + 코드 20", () => {
+  // protects=코드 후보가 일반 후보 자리를 먹지 않고 총 60 을 넘지 않는다; fails_when=코드 20 개 초과 · 일반 40 개 초과 · 일반이 코드에 밀려 줄면 실패; no_claim=기본값의 근거는 시험하지 않는다
+  const text = [...Array.from({ length: 50 }, (_, i) => `d${i}.md`), ...Array.from({ length: 50 }, (_, i) => `s${i}.py`)].join("\n");
+  const c = candidates(text);
+  assert.equal(c.filter(x => x.endsWith(".py")).length, 20);
+  assert.equal(c.filter(x => x.endsWith(".md")).length, 40);
+  assert.equal(c[0], "s49.py");
+});
+
+test("candidates: 글롭의 앞 * 하나는 글롭 · ** 두 개 이상은 굵게", () => {
+  // protects=`ls *a.md` 의 글롭이 파일 a.md 로 새지 않는다 · 굵게 장식은 그대로 뗀다; fails_when=단일 * 가 떼져 a.md 가 나오거나 ** 굵게가 안 떼지면 실패; no_claim=뒤쪽 * 짝 맞추기는 하지 않는다(`**src/a.ts changed**` 는 두 토큰)
+  assert.deepEqual(candidates("ls *a.md"), []);
+  assert.deepEqual(candidates("ls *.ts"), []);
+  assert.deepEqual(candidates("ls **/a.md"), []);
+  assert.deepEqual(candidates("**a.md**"), ["a.md"]);
+  assert.deepEqual(candidates("**src/a.ts changed**"), ["src/a.ts"]);
+});
+
+test("scanText: 세 줄 잇기 — 가운데 줄에 뒤 공백 · 상자 가장자리가 있어도", () => {
+  // protects=터미널이 줄을 공백으로 채우거나 Gemini 상자선이 붙어도 세 줄 이음이 된다; fails_when=가운데 줄 꾸밈 때문에 이어진 후보가 안 나오면 실패; no_claim=가운데 줄이 토큰 둘 이상이면 잇지 않는다는 점은 별도
+  for (const t of ["  docs/very/long/   \n  folder/name/      \n  guide2.md     ", "│ docs/very/long/ │\n│ folder/name/ │\n│ guide2.md │"]) {
+    const r = scanText(t);
+    assert.ok(r.cands.includes("docs/very/long/folder/name/guide2.md"), t);
+    assert.ok(r.guesses.has("docs/very/long/folder/name/guide2.md"), t);
+  }
+});
+
+test("mergeLight: 새 줄 먼저 · 남는 자리에 옛 줄", () => {
+  // protects=가벼운 다시 훑기에서 새 코드 줄이 옛 문서 줄에 밀려나지 않는다; fails_when=새 줄이 빠지거나 중복 · 순서가 틀리면 실패; no_claim=옛 줄끼리의 우선순위는 입력 순서뿐
+  const old = Array.from({ length: 12 }, (_, i) => `/p/old${i}.pdf`);
+  const fresh = ["/p/new1.ts", "/p/new2.ts"];
+  const m = mergeLight(fresh, old, 12);
+  assert.equal(m.length, 12);
+  assert.deepEqual(m.slice(0, 2), fresh);
+  assert.deepEqual(m.slice(2), old.slice(0, 10));
+  assert.deepEqual(mergeLight(["/p/a.md", "/p/b.ts"], ["/p/b.ts", "/p/c.md"], 12), ["/p/a.md", "/p/b.ts", "/p/c.md"]);
+  assert.deepEqual(mergeLight([], ["/p/x.md"], 12), ["/p/x.md"]);
+});
+
+test("endedWorking: 같은 주소에서 working 이 끝났을 때만 true", () => {
+  const w = { addr: "t1", status: "working" };
+  assert.equal(endedWorking(w, { addr: "t1", status: "idle" }), true);
+  assert.equal(endedWorking(w, { addr: "t1", status: null }), true);
+  assert.equal(endedWorking(w, { addr: "t1", status: "working" }), false);
+  assert.equal(endedWorking(w, { addr: "t2", status: "idle" }), false);
+  assert.equal(endedWorking({ addr: "t1", status: "idle" }, { addr: "t1", status: "idle" }), false);
+  assert.equal(endedWorking(null, { addr: "t1", status: "idle" }), false);
+  assert.equal(endedWorking(w, null), false);
 });
