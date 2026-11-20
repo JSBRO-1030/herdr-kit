@@ -216,7 +216,7 @@ test("state: SOURCES 에 ask · ownerKeys 가 ask 의 req/ack 를 싣는다", ()
   assert.ok(SOURCES.includes("ask"));
   const k = ownerKeys("o");
   assert.ok(k.includes("files-plus.req/o/ask") && k.includes("files-plus.ack/o/ask"));
-  assert.equal(k.length, 4 + SOURCES.length * 2);
+  assert.equal(k.length, 5 + SOURCES.length * 2);
 });
 
 test("main.js · fsops.js 글자: 요청 출처는 SOURCES · fsops 는 herdr 를 안 쓴다 · 경로를 요청에 안 싣는다", async () => {

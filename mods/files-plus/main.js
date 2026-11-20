@@ -12,7 +12,7 @@ import { FileMenu, AskDialog } from "./ask-view.js";
 import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
-import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT } from "./termfiles.js";
+import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS } from "./termfiles.js";
 import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
@@ -200,7 +200,7 @@ export default class FilesPlus extends View {
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
     // «터미널에 나온 파일» 줄: 상태는 this.tf* (스캔 시점 = 틱에서 key 변화 · 새로고침 단추 · 패널 열림 · working 중 10 s 가벼운 스캔)
-    this.tfList = []; this.tfCollapsed = false; this.tfBusy = false; this.tfAgain = false; this.tfT = null; this.tfKey = undefined; this.tfWho = ""; this.tfTimer = null; this.tfPending = false; this.tfLastAt = 0; this.tfText = null; this.tfLive = null; this.tfOwed = false;   // tfLive = 직전 틱의 {addr, status}(panes() 실시간) · tfOwed = working 이 끝났는데 아직 안 본 마지막 출력(빚)
+    this.tfList = []; this.tfCollapsed = false; this.tfBusy = false; this.tfAgain = false; this.tfT = null; this.tfKey = undefined; this.tfWho = ""; this.tfTimer = null; this.tfPending = false; this.tfLastAt = 0; this.tfText = null; this.tfLive = null; this.tfOwed = false; this.tfUrgent = false; this.tfGen = 0; this.tfBusyAt = 0; this.tfBusyKind = "full"; this.tfStage = ""; this.tfAbandons = 0; this.tfAbandonRun = 0; this.tfLastAbandon = null; this.tfNotePrev = null; this.tfNoteAt = 0;   // tfBusyKind = 진행 중 스캔의 종류("light" | "full") · tfStage = 진행 중 스캔이 지금 기다리는 단계(read · scan · resolve · search · merge) · tfAbandons = 이번 삶에 버린 횟수 · tfAbandonRun = 연속으로 버린 횟수(끝난 스캔이 0 으로) · tfLastAbandon = 마지막으로 버린 스캔의 {stage, kind, age(초)} · tfGen = 스캔 세대(낡은 스캔은 아무것도 안 쓴다) · tfBusyAt = 진행 중 스캔의 시작 시각 · tfNotePrev · tfNoteAt = 마지막으로 쓴 진단 기록(at 뺀 객체)과 쓴 시각 · tfLive = 직전 틱의 {addr, status}(panes() 실시간) · tfOwed = working 이 끝났는데 아직 안 본 마지막 출력(빚) · tfUrgent = ⟳ 또는 터미널·폴더 바뀜으로 줄 선 전체 훑기(감시가 늘어난 기다림 대신 TF_STUCK_MS 를 쓴다)
     cx.timer.every(300, cx => this.inbox(cx));
   }
 
@@ -208,7 +208,10 @@ export default class FilesPlus extends View {
   tfTick(cx) {
     const t = termTarget(this.tfT);
     this.tfT = t;
-    const key = t ? `${t.addr}|${t.on}|${t.cwd}|${t.status}` : "";
+    // 멎음 감시: 기다림(보통 stuckAfter(연속 버림 수) · ⟳ 나 터미널·폴더 바뀜으로 전체 훑기가 줄 섰으면(tfUrgent) 고정 TF_STUCK_MS) 넘게 안 끝난 스캔이 있으면 다시 요청한다 — tfScan 의 관문이 앞 스캔을 버린다(틱당 한 번). 가벼운 스캔은 가볍게(일하는 중 원격 find 없음) — 단 전체 스캔 요청이 줄 서 있거나(tfAgain) ⟳ · 터미널/폴더 바뀜이 대기 중(tfUrgent)이면 전체로 — 가볍게 다시 시작하면 tfUrgent 가 꺼져 줄 선 전체 스캔이 늘어난 기다림으로 밀린다.
+    // [주의] 연속으로 버릴수록 간격이 늘어난다(30 s → 480 s) — 버린 exec 는 못 끊어 멎은 머신에 쌓이므로. 상태(working ↔ idle)만 바뀐 것은 tfUrgent 를 켜지 않아 늘어난 기다림을 그대로 따른다.
+    if (this.tfBusy && Date.now() - this.tfBusyAt >= this.tfStuckMs()) this.tfScan(cx, this.tfBusyKind === "light" && !this.tfAgain && !this.tfUrgent);
+    const key = termKey(t);
     // [주의] t.status 는 이 패널이 눌려 있는 동안 낡는다(termTarget 이 앞 값을 그대로 둠) → 상태 판단은 panes() 의 실시간 값으로만 한다. key · tfT 에는 넣지 않는다(상태 뒤집힘이 전체 스캔으로 줄을 바꾸지 않게).
     const live = t ? panes().find(p => p.terminal === t.addr)?.status ?? null : null;
     // 같은 터미널에서 working 이 끝났으면 빚: 이 패널이 눌려 있으면 key 가 안 바뀌고 10 s 폴링도 working 이 아니라 멈춰, 마지막 출력을 놓친다 → 한 번 더 가볍게 본다.
@@ -220,10 +223,13 @@ export default class FilesPlus extends View {
       return;
     }
     const first = this.tfKey === undefined, who = t ? `${t.addr}|${t.on}|${t.cwd}` : "";
-    if (who !== this.tfWho) this.tfSet([], cx);       // 다른 터미널·폴더의 목록을 새 스캔 전까지 보이지 않는다(상태만 바뀐 경우는 그대로 둔다)
+    if (who !== this.tfWho) { this.tfUrgent = true; this.tfSet([], cx); }       // 다른 터미널·폴더의 목록을 새 스캔 전까지 보이지 않는다(상태만 바뀐 경우는 그대로 둔다)
     this.tfWho = who; this.tfKey = key;
     this.tfSchedule(cx, first ? 0 : TF_DEBOUNCE);
   }
+
+  // 멎음으로 보는 기다림: ⟳ · 터미널/폴더 바뀜으로 줄 선 전체 훑기(tfUrgent)는 고정 30 s, 그 밖(감시 · 상태만 바뀜)은 연속 버림에 따라 늘어난 기다림. 관문(tfScan)과 감시(tfTick)가 같이 쓴다.
+  tfStuckMs() { return this.tfUrgent ? TF_STUCK_MS : stuckAfter(this.tfAbandonRun); }
 
   tfSchedule(cx, ms) {
     try { this.tfTimer?.cancel(); } catch { /* 이미 끝남 */ }
@@ -237,49 +243,111 @@ export default class FilesPlus extends View {
   }
 
   // 스캔: 터미널 글자(hc read) → 후보 → 그 머신에서 진짜 있는 파일(sh). 한 번에 하나(진행 중이면 끝난 뒤 한 번 더). 시작한 key 가 그대로일 때만 반영한다.
-  // 전체 스캔 실패(hc 오류 · sh 오류 · 시간 초과)는 줄을 비우고 조용히 — 다음 스캔에서 다시.
+  // 전체 스캔 실패(hc 오류 · sh 오류 · 시간 초과)는 줄을 비우고 조용히 — 다음 스캔에서 다시. 결과는 tfNote 로 shared 에 한 줄 남긴다(진단용).
   // light(10 s 틱 · working 중): 글이 앞 스캔과 같으면 아무것도 안 한다 · 다르면 직접 풀기만(find 없음) · 앞 목록 뒤에 잇는다 · 실패해도 목록을 그대로 둔다.
+  // 멎음 감시: 관문(여기)과 감시(틱)가 tfStuckMs() 를 같이 쓴다 — ⟳ · 터미널/폴더 바뀜(tfUrgent)은 TF_STUCK_MS(30 s), 상태만 바뀜 · 감시는 stuckAfter(30 s 부터 두 배씩, 480 s 상한). 그 기다림을 넘게 안 끝난 스캔은 버리고(abandon) 새로 시작한다 — 호스트가 끊은 task 의 약속은 영영 안 끝나 tfBusy 가 영영 true 일 수 있다.
+  // 버려진 스캔(gen 이 낡음)은 await 뒤마다 빠져나가 아무것도 쓰지 않는다(tfBusy · tfAgain · tfText · 목록 · 기록 · 뒤따르는 스캔 모두).
+  // [주의] 버린 exec 는 못 끊는다 — 원격에서는 제 시간 초과(10 s)까지 find 가 계속 돈다. ⟳ 연타는 «어린 스캔 → 한 번만 대기 · 멎은 스캔 → 버리고 새로» 로 막는다.
   tfScan(cx, light = false) {
     if (this.closed) return;
-    if (this.tfBusy) { if (!light) this.tfAgain = true; return; }
+    const now = Date.now(), kind = light ? "light" : "full";
+    const gate = scanGate({ busy: this.tfBusy, busyAt: this.tfBusyAt, now, light, stuckMs: this.tfStuckMs() });
+    if (gate === "skip") return;
+    if (gate === "again") { this.tfAgain = true; return; }
+    if (gate === "abandon") {
+      // 버리는 스캔이 어느 단계에서 얼마나 멎었는지 남긴다(새 스캔을 시작하기 전에). 기록의 kind 는 버려지는 스캔의 것.
+      this.tfAgain = false; this.tfAbandons++; this.tfAbandonRun++;
+      this.tfLastAbandon = { stage: this.tfStage, kind: this.tfBusyKind, age: Math.round((now - this.tfBusyAt) / 1000) };
+      this.tfNote({ phase: "abandoned", kind: this.tfBusyKind, cands: 0, found: 0 });
+    }
+    const gen = ++this.tfGen;                 // 앞 스캔이 있었다면 이 순간부터 낡은 것
+    this.tfUrgent = false;                    // 스캔이 실제로 시작됐다 → 줄 선 «전체 훑기» 요청은 해소
     this.tfOwed = false;                      // 스캔이 실제로 시작될 때만 빚을 지운다(전체 스캔도 빚을 덮는다)
-    const t = this.tfT, key = this.tfKey;
-    if (!t?.cwd) { this.tfLastAt = Date.now(); this.tfSet([], cx); return; }
-    this.tfBusy = true;
+    const t = this.tfT, key = termKey(t);     // 이 스캔이 실제로 읽는 대상의 key(틱이 tfKey 를 갱신하기 전에 감시가 불러도 어긋나지 않게)
+    if (!t?.cwd) { this.tfBusy = false; this.tfAbandonRun = 0; this.tfLastAt = now; this.tfSet([], cx); this.tfNote({ phase: "no-cwd", kind, cands: 0, found: 0 }); return; }
+    this.tfBusy = true; this.tfBusyAt = now; this.tfBusyKind = kind;
+    this.tfStage = "spawn";                   // spawn 본문이 안 돌아도 lastAbandon.stage 가 앞 스캔의 단계를 물려받지 않게
     cx.spawn(async cx => {
-      let list = [], keep = false;
+      let list = [], keep = false, newText, phase = "ok", cands = 0, code, err, search, stage = "read";
+      // 단계 표시: 이 스캔이 아직 현재일 때만 this.tfStage 에 비춘다(버려진 스캔이 새 스캔의 단계를 덮지 않게).
+      const at = (s) => { stage = s; if (gen === this.tfGen) this.tfStage = s; };
       try {
+        at("read");
+        const t0 = Date.now();
         const r = await hcLimited(cx, ["read", t.addr, "--lines", String(TF_LINES), "--json"]);
-        if (!r || r.code !== 0) throw new Error("hc read");
-        let text = JSON.parse(r.stdout)?.text;
-        if (typeof text !== "string") throw new Error("no text");
+        if (gen !== this.tfGen) return;
+        if (!r || r.code !== 0) { phase = "read-failed"; code = r?.code; if (!r) err = Date.now() - t0 >= TF_READ_MS ? "timeout" : "failed"; throw new Error("hc read"); }
+        let text;
+        try { text = JSON.parse(r.stdout)?.text; } catch { phase = "read-failed"; err = "parse"; throw new Error("parse"); }
+        if (typeof text !== "string") { phase = "no-text"; throw new Error("no text"); }
         // [주의] 글자(UTF-16) 수로 자른다 — 바이트로는 최대 ~192 KiB. 터미널 글자는 믿을 수 없는 입력(이름은 위치 인자로만 sh 에 넘긴다).
         if (text.length > TF_TEXT) text = text.slice(-TF_TEXT);
-        if (light && text === this.tfText) keep = true;
+        if (light && text === this.tfText) { keep = true; phase = "same-text"; }
         else {
           const root = t.cwd;
-          const { cands, guesses } = scanText(text);
-          if (cands.length) {
-            const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, root, ...cands], { on: t.on, timeout: 10000 });
-            if (e.code !== 0) throw new Error("resolve");
+          at("scan");
+          const sc = scanText(text), guesses = sc.guesses;
+          cands = sc.cands.length;
+          if (cands) {
+            phase = "resolve-failed";
+            at("resolve");
+            const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, root, ...sc.cands], { on: t.on, timeout: 10000 });
+            if (gen !== this.tfGen) return;
+            if (e.code !== 0) { code = e.code; throw new Error("resolve"); }
+            phase = "ok";
+            at("merge");
             list = mergeResolved(e.stdout, null, { max: TF_MAX });
             // 2단계(전체 스캔만): 직접 못 푼 상대 이름만 find 한 번. 줄 잇기 추측(guesses)은 넘기지 않는다. 실패 · 시간 초과면 1단계 결과만 쓴다.
             const names = light ? [] : unresolved(e.stdout, { skip: guesses });
             if (names.length) {
               try {
+                at("search");
                 const f = await exec("sh", ["-c", SEARCH_SCRIPT, NAME, root, ...names], { on: t.on, timeout: 10000 });
+                if (gen !== this.tfGen) return;
+                at("merge");
                 if (f.code === 0) list = mergeResolved(e.stdout, f.stdout, { max: TF_MAX });
-              } catch { /* 1단계 결과 유지 */ }
+                else search = "failed";
+              } catch { search = "failed"; /* 1단계 결과 유지 */ }
+              if (gen !== this.tfGen) return;
             }
           }
+          at("merge");
           if (light) list = mergeLight(list, this.tfList, TF_MAX);
-          this.tfText = text;
+          newText = text;
         }
-      } catch { if (light) keep = true; else { list = []; this.tfText = null; } }
-      this.tfBusy = false; this.tfLastAt = Date.now();
+      } catch (e) {
+        if (gen !== this.tfGen) return;
+        // 단계로 갈음: 읽기 · 풀기에서 던졌으면 그 이름, 그 밖(scanText · merge* 가 던짐)은 parse-failed. 위에서 정한 phase 는 그대로 둔다.
+        if (phase === "ok") phase = { read: "read-failed", resolve: "resolve-failed" }[stage] ?? "parse-failed";
+        err ??= errClass(e);
+        if (light) keep = true; else { list = []; newText = null; }
+      }
+      if (gen !== this.tfGen) return;
+      if (newText !== undefined) this.tfText = newText;
+      this.tfBusy = false; this.tfAbandonRun = 0; this.tfLastAt = Date.now();
       if (!keep && !this.closed && this.tfKey === key) this.tfSet(list, cx);
+      const note = { phase, kind, cands, found: list.length, shown: this.tfList.length };   // shown = 줄이 실제로 보여 주는 수(tfSet 뒤)
+      if (code !== undefined) note.code = code;
+      if (err) note.err = err;
+      if (search) note.search = search;
+      // [주의] ok 직후의 same-text 는 새로 본 게 없다 — 분류만 번갈아 바뀌어 매번 쓰는 걸 막는다(앞 기록이 ok 가 아니면 그대로 남긴다).
+      if (!(phase === "same-text" && this.tfNotePrev?.phase === "ok")) this.tfNote(note);
       if (this.tfAgain && !this.closed) { this.tfAgain = false; this.tfScan(cx); }
     });
+  }
+
+  // 마지막 훑기 결과를 shared 에 한 줄 남긴다(진단용 · 패널만 쓴다). 쓸지는 noteWrite — 분류가 바뀌면 바로, 개수(cands · found · shown)만 바뀌면 OWNER_BEAT_MS 이상 지났을 때만. 닫혔거나 낡은 삶이면 안 쓴다. 실패해도 조용히.
+  // 한 번이라도 버렸으면 모든 기록에 abandons · lastAbandon 을 합친다.
+  // [경고] 이름 · 폴더 · 터미널 글자는 넣지 않는다 — 숫자와 짧은 분류만.
+  tfNote(obj) {
+    try {
+      if (this.closed || !this.lifeOk()) return;
+      const next = this.tfAbandons ? { ...obj, abandons: this.tfAbandons, lastAbandon: this.tfLastAbandon } : obj;
+      const now = Date.now();
+      if (!noteWrite(this.tfNotePrev, next, now, this.tfNoteAt, OWNER_BEAT_MS)) return;
+      setShared(KEY.tf(this.owner), { at: now, ...next });
+      this.tfNotePrev = next; this.tfNoteAt = now;
+    } catch { /* 기록이 훑기를 막지 않게 */ }
   }
 
   // 줄 클릭 → 미리보기(openPreview 와 같은 꼴 · 그 파일 하나). 터미널 출력만으로 저절로 열지 않는다.
@@ -301,7 +369,7 @@ export default class FilesPlus extends View {
           .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(`터미널에 나온 파일 · ${list.length}`)))
         .child(h_flex().id("tf-refresh").w(24).h(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
           .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("다시 찾기")
-          .on_click((_e, cx) => this.tfScan(cx)).child(svg(icon("history")).size(14).flex_none())))
+          .on_click((_e, cx) => { this.tfUrgent = true; this.tfScan(cx); }).child(svg(icon("history")).size(14).flex_none())))
       .when(!this.tfCollapsed && list.length > 0, el => el.child(v_flex().id("tf-list").max_h(TF_ROWS * 28 + 8).overflow_y_scrollbar().px(6).pb(6).children(list.map((abs, i) => {
         const parts = abs.split("/"), name = parts.pop(), dir = parts.pop() ?? "";
         return h_flex().id(`tf-row-${i}`).h(28).flex_none().px(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
@@ -882,7 +950,7 @@ export default class FilesPlus extends View {
   // 팝업 요청함(300 ms). 모르는 action 은 무시한다.
   inbox(cx) {
     if (this.closed || !this.lifeOk()) return;    // 낡은 삶은 요청함도 비우지 않는다(ack 를 올려 새 삶의 요청을 가로채지 않게)
-    try { this.tfTick(cx); } catch { /* 터미널 줄 오류가 요청함을 막지 않게 */ }
+    try { this.tfTick(cx); } catch (e) { try { this.tfNote({ phase: "tick-error", kind: "full", cands: 0, found: 0, err: errClass(e) }); } catch { /* 터미널 줄 오류가 요청함을 막지 않게 */ } }
     for (const from of SOURCES) {
       for (const req of drain(shared, setShared, this.owner, from)) {
         try { this.handle(req.action, req.args ?? {}, cx); } catch { /* 한 요청 오류가 나머지를 막지 않게 */ }

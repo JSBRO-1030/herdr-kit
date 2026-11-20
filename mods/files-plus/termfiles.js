@@ -357,3 +357,44 @@ export function parseResolved(stdout, { max = 8 } = {}) {
 export function endedWorking(prev, cur) {
   return !!prev && !!cur && prev.addr === cur.addr && prev.status === "working" && cur.status !== "working";
 }
+
+// 훑기가 «멎었다» 고 보는 시간. 정상 훑기 최악 = hc read 5 s + 풀기 10 s + 찾기 10 s = 25 s → 여유를 두어 30 s.
+export const TF_STUCK_MS = 30000;
+// 훑기 시작 관문(순수): "start" = 바로 시작 · "abandon" = 앞 훑기를 버리고 새로 시작(멎음 — busyAt 이 숫자가 아니어도) · "skip" = 가벼운 훑기는 그냥 버림 · "again" = 전체 훑기는 끝난 뒤 한 번 더.
+export function scanGate({ busy, busyAt, now, light, stuckMs = TF_STUCK_MS }) {
+  if (!busy) return "start";
+  if (!Number.isFinite(busyAt) || !Number.isFinite(now) || now - busyAt >= stuckMs) return "abandon";
+  return light ? "skip" : "again";
+}
+
+// 오류 → 진단 기록용 분류(허용 목록). [경고] 메시지 글은 절대 돌려주지 않는다 — 경로 · 호스트 이름이 섞일 수 있다. 시간 초과 · 글자만으로 된 오류 이름 · "error" 중 하나.
+export function errClass(e) {
+  try {
+    const m = String(e?.message ?? ""), n = String(e?.name ?? "");
+    if (/time(d)?\s?out/i.test(m)) return "timeout";
+    return /^[A-Za-z]{1,40}$/.test(n) ? n : "error";
+  } catch { return "error"; }
+}
+
+// 틱·스캔이 같이 쓰는 대상 key(주소|머신|폴더|상태) — 스캔이 «자기가 읽는 대상» 의 key 를 직접 만들 수 있게 순수 함수로 둔다.
+export function termKey(t) {
+  return t ? `${t.addr}|${t.on}|${t.cwd}|${t.status}` : "";
+}
+
+// 멎음 감시 백오프: 연속으로 버린 횟수(run)가 늘수록 기다림을 두 배씩(30 s · 60 s · 120 s · 240 s · 480 s 상한). run 이 숫자가 아니거나 음수면 base.
+// [주의] 버려도 원격 exec 는 못 끊는다 — 감시가 멎은 머신에 find 를 계속 쌓지 않게 간격을 넓힌다.
+export function stuckAfter(run, base = TF_STUCK_MS) {
+  return Number.isFinite(run) && run >= 0 ? base * 2 ** Math.min(run, 4) : base;
+}
+
+// 진단 기록을 쓸지(순수). prev · next = at 뺀 기록. 처음 · 분류가 바뀜 · 개수(cands · found · shown) 중 하나가 0 이 되거나 0 에서 벗어남 → 바로 · 그 밖에 개수 크기만 바뀌면(1 → 2) minGap 이 지났을 때만 · 같으면 안 쓴다.
+// 0 여부를 분류에 넣는 이유: «3 → 0» 이 minGap 에 막힌 채 훑기가 더 없으면 기록은 영영 3 인데 띠는 «· 0» 이 되는 증상을 숨긴다.
+// [주의] setShared 는 shared.json 을 다시 쓰고 모든 모드를 다시 그린다 — 개수만 자주 바뀌는 기록으로 쓰기가 쏟아지지 않게.
+const COUNT_KEYS = ["cands", "found", "shown"];
+const sigNoCounts = (o) => JSON.stringify(Object.fromEntries(Object.entries(o).map(([k, v]) => [k, COUNT_KEYS.includes(k) ? Number(v) > 0 : v])));
+export function noteWrite(prev, next, now, lastAt, minGap = 15000) {
+  if (prev == null) return true;
+  if (sigNoCounts(prev) !== sigNoCounts(next)) return true;
+  if (JSON.stringify(prev) === JSON.stringify(next)) return false;
+  return !Number.isFinite(now - lastAt) || now - lastAt >= minGap;
+}

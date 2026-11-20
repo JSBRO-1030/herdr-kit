@@ -226,10 +226,12 @@ test("safeName: 빈 것 · . · .. · / · NUL 거절", () => {
 
 test("ownerKeys · alive", () => {
   const k = ownerKeys("o");
-  assert.deepEqual(k, ["files-plus.jobs/o", "files-plus.win/o", "files-plus.preview/o", "files-plus.resize/o", "files-plus.req/o/preview", "files-plus.ack/o/preview", "files-plus.req/o/jobs", "files-plus.ack/o/jobs", "files-plus.req/o/ask", "files-plus.ack/o/ask"]);
+  assert.deepEqual(k, ["files-plus.jobs/o", "files-plus.win/o", "files-plus.preview/o", "files-plus.resize/o", "files-plus.tf/o", "files-plus.req/o/preview", "files-plus.ack/o/preview", "files-plus.req/o/jobs", "files-plus.ack/o/jobs", "files-plus.req/o/ask", "files-plus.ack/o/ask"]);
   assert.deepEqual(SOURCES, ["preview", "jobs", "ask"]);
   assert.ok(SOURCES.includes("ask") && k.includes("files-plus.req/o/ask"));
   assert.equal(KEY.win("o"), "files-plus.win/o");
+  assert.equal(KEY.tf("o"), "files-plus.tf/o");
+  assert.ok(k.includes(KEY.tf("o")), "닫힘 · 죽은 주인 정리가 터미널 파일 진단 키도 치운다");
   const { get, set } = store();
   assert.equal(alive(get, "o"), false);
   set(KEY.jobs("o"), snapshot("o", "", [], 1));

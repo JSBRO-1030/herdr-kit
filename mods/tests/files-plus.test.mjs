@@ -1142,3 +1142,31 @@ test("main.js: 올리기 spec 의 dir 은 방향 \"up\"", async () => {
   assert.equal((body.match(/^\s*dir, name/gm) ?? []).length, 0, "약식 `dir, name` 금지");
   assert.equal((body.match(/dir: "up", name/g) ?? []).length, 4);
 });
+
+// «터미널에 나온 파일» 훑기 글자 확인: await 마다 세대 확인이 있고 · 버림 횟수를 세고 · 멎음 감시는 같은 종류로 다시 부르고 · ok 뒤 same-text 는 안 쓴다.
+test("main.js: tfScan 의 await 마다 gen 확인 · 버림 기록 · 감시는 같은 종류 · same-text 건너뜀", async () => {
+  const src = await readFile(new URL("../files-plus/main.js", import.meta.url), "utf8");
+  const from = src.indexOf("  tfScan(cx, light = false) {"), to = src.indexOf("  // 마지막 훑기 결과를 shared 에 한 줄");
+  assert.ok(from > 0 && to > from, "tfScan 본문을 못 찾음");
+  const body = src.slice(from, to);
+  const lines = body.split("\n");
+  const aw = lines.map((l, i) => (/\bawait /.test(l) ? i : -1)).filter((i) => i >= 0);
+  assert.ok(aw.length > 0, "await 없음");
+  for (const i of aw) assert.ok(/^\s*if \(gen !== this\.tfGen\) return;/.test(lines[i + 1] ?? ""), `await 다음 줄에 gen 확인 없음: ${lines[i].trim().slice(0, 60)}`);
+  assert.ok(/phase === "same-text" && this\.tfNotePrev\?\.phase === "ok"/.test(body), "ok 뒤 same-text 건너뜀");
+  assert.ok(body.includes("this.tfAbandons++"), "버림 횟수");
+  const tick = src.slice(src.indexOf("  tfTick(cx) {"), src.indexOf("  tfSchedule(cx, ms) {"));
+  assert.ok(tick.includes('if (this.tfBusy && Date.now() - this.tfBusyAt >= this.tfStuckMs()) this.tfScan(cx, this.tfBusyKind === "light" && !this.tfAgain && !this.tfUrgent);'), "감시: ⟳ · 터미널/폴더 바뀜(tfUrgent)은 고정 30 s, 아니면 백오프 · 종류를 이어 받되 줄 선 전체 요청이 있으면 전체");
+  assert.ok(body.includes("light, stuckMs: this.tfStuckMs() })"), "관문도 감시와 같은 기다림(tfStuckMs)");
+  assert.ok(src.includes("tfStuckMs() { return this.tfUrgent ? TF_STUCK_MS : stuckAfter(this.tfAbandonRun); }"), "tfStuckMs: 긴급이면 30 s, 아니면 늘어난 기다림");
+  assert.ok(tick.includes("const key = termKey(t);"), "틱의 key 는 termKey");
+  assert.ok(/if \(who !== this\.tfWho\) \{ this\.tfUrgent = true; this\.tfSet\(\[\], cx\); \}/.test(tick), "터미널·폴더(who) 바뀜에서만 tfUrgent — 상태만 바뀐 건 아님");
+  assert.equal((tick.match(/tfUrgent = true/g) ?? []).length, 1, "틱에서 tfUrgent 를 켜는 곳은 who 바뀜 한 곳");
+  assert.ok(body.includes("const t = this.tfT, key = termKey(t);"), "스캔은 자기가 읽는 대상의 key(termKey(t))");
+  assert.ok(!/key = this\.tfKey/.test(body), "스캔이 this.tfKey 를 캡처하면 안 됨(감시가 틱 안에서 먼저 부르면 앞 대상의 key)");
+  assert.ok(body.indexOf("this.tfUrgent = false") > body.indexOf("const gen = ++this.tfGen;"), "스캔이 실제로 시작될 때 tfUrgent 해소");
+  const rIcon = src.indexOf("this.tfUrgent = true; this.tfScan(cx);");
+  assert.ok(rIcon > 0 && /\.on_click\(\(_e, cx\) => \{ this\.tfUrgent = true; this\.tfScan\(cx\); \}\)/.test(src), "⟳ 핸들러: tfScan 전에 tfUrgent");
+  const iSt = body.indexOf('this.tfStage = "spawn"'), iSp = body.indexOf("cx.spawn(");
+  assert.ok(iSt > 0 && iSp > iSt, "spawn 전에 tfStage = spawn");
+});

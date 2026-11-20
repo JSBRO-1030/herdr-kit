@@ -9,6 +9,7 @@ export const KEY = {
   history: "files-plus.history",                             // 패널만 쓴다
   previewSize: "files-plus.previewSize",                     // 미리보기 창 크기 {w,h} px(자리는 기억하지 않는다) · 미리보기 창이 쓴다
   fontSize: "files-plus.fontSize",                           // 미리보기 글자 크기 {md, code} px · 미리보기 창이 쓴다
+  tf: owner => `files-plus.tf/${owner}`,                     // 패널만 쓴다 · 터미널 파일 줄의 마지막 훑기 결과(진단용 {at, phase, kind, cands, found, …})
   resize: owner => `files-plus.resize/${owner}`,             // 크기 틀이 쓴다: 열 때 {id: 미리보기 id, at} · 닫을 때(어느 길이든) null — 미리보기가 «틀이 닫혔다» 를 알아 포커스를 되찾는다
 };
 
@@ -203,7 +204,7 @@ export const SOURCES = ["preview", "jobs", "ask"];
 
 // 이 주인이 만든 shared 키 전부 — 패널이 닫힐 때 null 로 치운다(영속 shared 에 쌓이지 않게).
 export function ownerKeys(owner) {
-  return [KEY.jobs(owner), KEY.win(owner), previewKey(owner), KEY.resize(owner), ...SOURCES.flatMap(f => [KEY.req(owner, f), KEY.ack(owner, f)])];
+  return [KEY.jobs(owner), KEY.win(owner), previewKey(owner), KEY.resize(owner), KEY.tf(owner), ...SOURCES.flatMap(f => [KEY.req(owner, f), KEY.ack(owner, f)])];
 }
 
 // 호스트 shared() 는 저장된 값 어딘가에 `toString` 키가 있으면 던진다("'toString' is read-only").
@@ -227,7 +228,7 @@ export function newOwner() {
 
 // 패널의 owner 는 copy 의 localStorage 에 둔다: 제자리 다시 불러오기(파일 저장)에도 close() 가 안 불려서(AGENTS.md)
 // 새 owner 를 만들면 옛 owner 의 jobs 키가 객체로 남아 alive() 가 영영 참이 된다 → 같은 copy 는 같은 owner 를 이어 쓴다.
-// 그래서 shared 에 남는 owner 키 수 = (서로 다른 패널 블록 수) × 10 이지 다시 불러온 횟수·재시작 횟수가 아니다.
+// 그래서 shared 에 남는 owner 키 수 = (서로 다른 패널 블록 수) × 11 이지 다시 불러온 횟수·재시작 횟수가 아니다.
 // taken = 이 프로세스에서 이미 다른 살아 있는 copy 가 쓰는 owner 들(저장소가 copy 끼리 겹쳐 보일 때를 대비) → 겹치면 새로 짓고 저장하지 않는다.
 export const OWNER_STORE = "files-plus.owner";
 export function restoreOwner(storage, taken = new Set()) {

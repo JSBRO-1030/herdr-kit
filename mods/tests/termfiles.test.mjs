@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, mkdir, rm, realpath, symlink, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS } from "../files-plus/termfiles.js";
+import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS, scanGate, TF_STUCK_MS, errClass, stuckAfter, noteWrite, termKey } from "../files-plus/termfiles.js";
 
 const base = await realpath(await mkdtemp(join(process.env.TMPDIR || tmpdir(), "termfiles-")));
 after(() => rm(base, { recursive: true, force: true }));
@@ -499,4 +499,74 @@ test("endedWorking: 같은 주소에서 working 이 끝났을 때만 true", () =
   assert.equal(endedWorking({ addr: "t1", status: "idle" }, { addr: "t1", status: "idle" }), false);
   assert.equal(endedWorking(null, { addr: "t1", status: "idle" }), false);
   assert.equal(endedWorking(w, null), false);
+});
+
+test("scanGate: 안 바쁘면 start · 어린 훑기는 light=skip / 전체=again · 30 s 이상이면 abandon", () => {
+  const now = 100000;
+  assert.equal(scanGate({ busy: false, busyAt: 0, now, light: false }), "start");
+  assert.equal(scanGate({ busy: false, busyAt: 0, now, light: true }), "start");
+  assert.equal(scanGate({ busy: true, busyAt: now - 1000, now, light: true }), "skip");
+  assert.equal(scanGate({ busy: true, busyAt: now - 1000, now, light: false }), "again");
+  assert.equal(scanGate({ busy: true, busyAt: now - (TF_STUCK_MS - 1), now, light: false }), "again");
+  assert.equal(scanGate({ busy: true, busyAt: now - TF_STUCK_MS, now, light: false }), "abandon", "정확히 stuckMs 에서 버린다");
+  assert.equal(scanGate({ busy: true, busyAt: now - TF_STUCK_MS, now, light: true }), "abandon", "가벼운 훑기도 멎음이면 버린다");
+  assert.equal(scanGate({ busy: true, busyAt: now - 5, now, light: false, stuckMs: 5 }), "abandon");
+  assert.equal(TF_STUCK_MS, 30000);
+});
+
+test("scanGate: busyAt 이 숫자가 아니면 abandon(영영 막히지 않게)", () => {
+  for (const busyAt of [undefined, null, NaN, Infinity, "x"]) assert.equal(scanGate({ busy: true, busyAt, now: 5, light: false }), "abandon", String(busyAt));
+});
+
+test("errClass: 메시지 글은 안 돌려준다 · 시간 초과 · 이름 허용 목록 · 던지는 getter", () => {
+  assert.equal(errClass(new Error("cannot read /tmp/work/a.txt")), "Error");
+  assert.equal(errClass(new Error("connect to somehost failed")), "Error");
+  const te = new TypeError("bad /x/y"); assert.equal(errClass(te), "TypeError");
+  assert.equal(errClass(new Error("timed out")), "timeout");
+  assert.equal(errClass(new Error("Timeout")), "timeout");
+  assert.equal(errClass(new Error("time out after 10s")), "timeout");
+  assert.equal(errClass({ name: "Err0r9", message: "x" }), "error");
+  assert.equal(errClass({ name: "Bad Name", message: "x" }), "error");
+  assert.equal(errClass({ name: "A".repeat(41), message: "x" }), "error");
+  assert.equal(errClass({ get message() { throw new Error("boom"); } }), "error");
+  assert.equal(errClass({ message: "x", get name() { throw new Error("boom"); } }), "error");
+  assert.equal(errClass(null), "error");
+  assert.equal(errClass(undefined), "error");
+});
+
+test("stuckAfter: 연속 버림마다 두 배 · 480 s 상한 · 이상한 값은 base", () => {
+  assert.equal(stuckAfter(0), 30000);
+  assert.equal(stuckAfter(1), 60000);
+  assert.equal(stuckAfter(2), 120000);
+  assert.equal(stuckAfter(3), 240000);
+  assert.equal(stuckAfter(4), 480000);
+  assert.equal(stuckAfter(9), 480000);
+  for (const r of [-1, NaN, undefined, Infinity]) assert.equal(stuckAfter(r), 30000, String(r));
+  assert.equal(stuckAfter(2, 1000), 4000);
+});
+
+test("termKey: 없으면 빈 문자열 · addr|on|cwd|status 순서로 잇는다", () => {
+  assert.equal(termKey(null), "");
+  assert.equal(termKey(undefined), "");
+  assert.equal(termKey({ addr: "t1", on: "m1", cwd: "/w", status: "idle" }), "t1|m1|/w|idle");
+  assert.equal(termKey({ addr: "t1", on: null, cwd: "/w", status: "working" }), "t1|null|/w|working");
+});
+
+test("noteWrite: 처음 · 분류 바뀜은 바로 · 개수만 바뀌면 minGap 뒤 · 같으면 안 씀", () => {
+  const a = { phase: "ok", kind: "full", cands: 3, found: 2, shown: 2 };
+  assert.equal(noteWrite(null, a, 1000, 0), true);
+  assert.equal(noteWrite(undefined, a, 1000, 0), true);
+  assert.equal(noteWrite(a, { ...a, phase: "read-failed" }, 1001, 1000), true);
+  assert.equal(noteWrite(a, { ...a, cands: 4, found: 3 }, 5000, 1000), false);
+  assert.equal(noteWrite(a, { ...a, cands: 4 }, 16000, 1000), true);
+  assert.equal(noteWrite(a, { ...a, cands: 4 }, 15999, 1000), false);
+  assert.equal(noteWrite(a, { ...a }, 99999, 1000), false);
+  assert.equal(noteWrite(a, { ...a, abandons: 1 }, 1001, 1000), true);
+  assert.equal(noteWrite(a, { ...a, shown: 0 }, NaN, 1000), true);
+  assert.equal(noteWrite(a, { ...a, found: 9 }, 5000, 1000, 1000), true);
+  // 개수가 0 이 되거나 0 에서 벗어나면 minGap 안이어도 바로 · 크기만 바뀌면 그대로 느림
+  assert.equal(noteWrite(a, { ...a, shown: 0 }, 2000, 1000), true);
+  assert.equal(noteWrite({ ...a, found: 0 }, { ...a, found: 2 }, 2000, 1000), true);
+  assert.equal(noteWrite(a, { ...a, cands: 4 }, 2000, 1000), false);
+  assert.equal(noteWrite({ ...a, cands: 1 }, { ...a, cands: 2 }, 2000, 1000), false);
 });
