@@ -1172,7 +1172,7 @@ test("main.js: tfScan 의 await 마다 gen 확인 · 버림 기록 · 감시는 
 });
 
 // 터미널 더블클릭 열기(dcTick) 글자 확인: 클립보드 글(clip)은 exec 로 가지 않는다 · await 마다 dcGen 확인 · tf* 상태 · 기록 · shared 를 건드리지 않는다.
-test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_SCRIPT+cand 뿐 · clip 은 dcPick 에만", async () => {
+test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_SCRIPT+cand+longer(dcLonger 탐침) 뿐 · clip 은 dcPick · dcLonger 에만", async () => {
   const src = await readFile(new URL("../files-plus/main.js", import.meta.url), "utf8");
   const from = src.indexOf("  dcTick(cx) {"), to = src.indexOf("  // 머리줄 아래 칸");
   assert.ok(from > 0 && to > from, "dcTick 본문을 못 찾음");
@@ -1181,10 +1181,13 @@ test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_
   const execs = code.filter(l => /\bexec\(/.test(l)).map(l => l.trim());
   assert.equal(execs.length, 2, "exec 호출은 둘뿐");
   assert.ok(execs[0].includes('await exec("/bin/sh", ["-c", "LC_ALL=en_US.UTF-8 /usr/bin/pbpaste | /usr/bin/head -c 4097"], { timeout: 2000 })'), "첫 exec = 상수 pbpaste 스크립트(인자 없음 · 로컬)");
-  assert.ok(execs[1].includes('await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand], { on, timeout: 10000 })'), "둘째 exec = RESOLVE_SCRIPT + cwd + cand");
+  assert.ok(execs[1].includes('await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand, ...longer], { on, timeout: 10000 })'), "둘째 exec = RESOLVE_SCRIPT + cwd + cand + longer(터미널 글자에서 나온 탐침)");
+  assert.ok(code.some(l => l.trim() === "const longer = dcLonger({ clip, sel, text, cand });"), "longer 는 dcLonger 에서만(clip 은 거기까지만)");
+  assert.ok(code.some(l => l.includes("const path = dcChoose(e.stdout, cand, longer);")), "결과는 dcChoose 를 거친다");
+  assert.ok(!code.some(l => /mergeResolved|found\.length/.test(l)), "mergeResolved · found.length 판정은 dcChoose 로 대체됨");
   for (const l of execs) assert.ok(!/\bclip\b/.test(l), `exec 줄에 clip 금지: ${l.slice(0, 60)}`);
   const uses = code.filter(l => /\bclip\b/.test(l)).map(l => l.trim());
-  assert.ok(uses.every(l => l.startsWith("const clip = ") || l.startsWith("if (typeof clip") || l.includes("dcPick({ clip, sel, cols, text })")), `clip 사용처가 정해진 셋 밖: ${uses.join(" | ")}`);
+  assert.ok(uses.every(l => l.startsWith("const clip = ") || l.startsWith("if (typeof clip") || l.includes("dcPick({ clip, sel, cols, text })") || l.includes("dcLonger({ clip, sel, text, cand })")), `clip 사용처가 정해진 넷 밖: ${uses.join(" | ")}`);
   assert.ok(uses.some(l => l.includes("dcPick({ clip, sel, cols, text })")), "clip 은 dcPick 으로");
   assert.ok(!SHARED_OR_NOTE.test(code.join("\n")), "setShared · notify · tfNote · this.tf* 금지");
   const aw = lines.map((l, i) => (/\bawait /.test(l) ? i : -1)).filter(i => i >= 0);
@@ -1196,8 +1199,8 @@ test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_
   assert.ok(iSeen > 0 && iNoTerm > 0 && iSeen < iNoTerm, "dcSeen 갱신은 이른 return 앞");
   assert.ok(/dcStep\([^)]*prevKey: prevSeen\?\.get\(addr\)/.test(body), "dcStep 에 앞 틱 key 를 넘긴다");
   assert.ok(body.includes("selKey(g?.selection ?? null) !== selKey(sel)") && body.includes("g?.terminal !== addr") && body.includes("this.lifeOk()"), "열기 전 같은 터미널 · 같은 선택 · 닫힘 · 삶 확인");
-  assert.ok(body.includes("this.openTermFile(found[0], on);"), "찍힌 머신(on)으로 연다");
-  const iGet = body.indexOf("this.dcOpened.get(addr) === found[0]"), iSet = body.indexOf("this.dcOpened.set(addr, found[0])"), iOpen = body.indexOf("this.openTermFile(found[0], on);");
+  assert.ok(body.includes("this.openTermFile(path, on);"), "찍힌 머신(on)으로 연다");
+  const iGet = body.indexOf("this.dcOpened.get(addr) === path"), iSet = body.indexOf("this.dcOpened.set(addr, path)"), iOpen = body.indexOf("this.openTermFile(path, on);");
   assert.ok(iGet > 0 && iSet > iGet && iSet < iOpen, "방금 연 파일 확인(get)이 기록(set) 앞 · 둘 다 열기 앞");
   const iAge = body.indexOf("DC_OPEN_MAX_MS");
   assert.ok(iAge > 0 && iAge < iOpen && iAge > iGet, "나이 제한 확인이 열기 앞");

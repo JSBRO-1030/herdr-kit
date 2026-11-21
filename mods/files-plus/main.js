@@ -12,7 +12,7 @@ import { FileMenu, AskDialog } from "./ask-view.js";
 import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
-import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS, dcStep, dcPick, selSpan, selKey } from "./termfiles.js";
+import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS, dcStep, dcPick, dcLonger, dcChoose, selSpan, selKey } from "./termfiles.js";
 import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
@@ -365,7 +365,7 @@ export default class FilesPlus extends View {
 
   // 터미널에서 낱말을 더블클릭(= 마우스 선택) → 그 낱말이 터미널에 나온 파일 이름이면 미리보기. macOS 전용(클립보드 = pbpaste).
   // 평소 틱은 입출력이 없다(terminals · focused · panes 만 · spaces 는 fire 때) — 선택이 400 ms 머물러 «새 선택» 이 될 때만 작업을 하나 띄운다.
-  // 클립보드 글은 터미널 글자에서 찾은 후보 중 하나를 «고르는 데만» 쓴다(dcPick). 클립보드에서만 온 글은 exec 로 가지 않는다 — exec 에는 상수 스크립트와 터미널 쪽 후보(cand)만 간다.
+  // 클립보드 글은 터미널 글자에서 찾은 후보 중 하나를 «고르는 데만» 쓴다(dcPick). 클립보드에서만 온 글은 exec 로 가지 않는다 — exec 에는 상수 스크립트 · 터미널 쪽 후보(cand) · dcLonger 가 터미널 글자에서 자른 «더 긴 이름» 탐침만 간다.
   dcTick(cx) {
     if (!this.mac || this.closed) return;
     const ts = terminals();
@@ -391,7 +391,7 @@ export default class FilesPlus extends View {
     const gen = ++this.dcGen;                                   // 새 선택이 앞 작업을 밀어낸다 — 앞 작업은 이 순간부터 낡은 것
     cx.spawn(async cx => {
       try {
-        // [경고] 클립보드(믿을 수 없는 입력 · 비밀번호일 수 있음)는 저장 · 기록 · 진단 · exec 인자로 쓰지 않는다. dcPick 이 터미널 글자의 후보 중 하나를 고르는 데만 쓴다.
+        // [경고] 클립보드(믿을 수 없는 입력 · 비밀번호일 수 있음)는 저장 · 기록 · 진단 · exec 인자로 쓰지 않는다. dcPick 이 터미널 글자의 후보 중 하나를 고르는 데만 쓴다(dcLonger 는 clip 으로 꼬리를 확인할 뿐 탐침은 터미널 글자 + cand 로만 만든다).
         const c = await exec("/bin/sh", ["-c", "LC_ALL=en_US.UTF-8 /usr/bin/pbpaste | /usr/bin/head -c 4097"], { timeout: 2000 });
         if (gen !== this.dcGen) return;
         const clip = c?.code === 0 ? c.stdout : null;
@@ -404,17 +404,19 @@ export default class FilesPlus extends View {
         if (text.length > TF_TEXT) text = text.slice(-TF_TEXT);
         const cand = dcPick({ clip, sel, cols, text });
         if (cand === null) return;
-        const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand], { on, timeout: 10000 });
+        // «더 긴 이름»(cand + 붙은 꼬리 · 줄바꿈 뒤 이어진 조각)도 같은 exec 로 확인한다 — 있으면 dcChoose 가 아무것도 열지 않는다. 탐침은 터미널 글자 + cand 로만 만든다(clip 은 안 간다).
+        const longer = dcLonger({ clip, sel, text, cand });
+        const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand, ...longer], { on, timeout: 10000 });
         if (gen !== this.dcGen) return;
         if (e.code !== 0) return;
-        const found = mergeResolved(e.stdout, null, { max: 2 });   // 정확히 하나일 때만 연다(찾기 단계 없음)
-        if (found.length !== 1) return;
-        if (this.dcOpened.get(addr) === found[0]) return;   // 방금 연 파일 — 선택이 풀릴 때까지 다시 안 연다(줄이 밀려 같은 선택이 새 선택처럼 보여도)
+        const path = dcChoose(e.stdout, cand, longer);   // 정확히 하나일 때만 연다(찾기 단계 없음) · 더 긴 이름 파일이 있으면 null
+        if (path === null) return;
+        if (this.dcOpened.get(addr) === path) return;   // 방금 연 파일 — 선택이 풀릴 때까지 다시 안 연다(줄이 밀려 같은 선택이 새 선택처럼 보여도)
         if (Date.now() - now > DC_OPEN_MAX_MS) return;       // 선택한 지 너무 오래 — 늦게 뜬 미리보기가 키보드를 가져가지 않게
         const g = focused();
         if (g?.terminal !== addr || selKey(g?.selection ?? null) !== selKey(sel) || this.closed || !this.lifeOk()) return;   // 그 선택이 아직 현재 선택일 때만
-        this.dcOpened.set(addr, found[0]);
-        this.openTermFile(found[0], on);
+        this.dcOpened.set(addr, path);
+        this.openTermFile(path, on);
       } catch { /* 조용히 */ }
     });
   }

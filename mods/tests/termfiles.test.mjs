@@ -7,8 +7,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, mkdir, rm, realpath, symlink, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS, scanGate, TF_STUCK_MS, errClass, stuckAfter, noteWrite, termKey, cellWidth, selSpan, selKey, dcStep, dcPick } from "../files-plus/termfiles.js";
+import { candidates, scanText, pickRows, parseResolved, RESOLVE_SCRIPT, SEARCH_SCRIPT, unresolved, mergeResolved, terminalMachine, trimTail, mergeLight, endedWorking, TERM_EXTS, CODE_EXTS, scanGate, TF_STUCK_MS, errClass, stuckAfter, noteWrite, termKey, cellWidth, selSpan, selKey, dcStep, dcPick, dcLonger, dcChoose, DC_MAX_PROBES, NAME_MAX_UNITS } from "../files-plus/termfiles.js";
 
+const utf8Len = (s) => Buffer.byteLength(s, "utf8");
 const base = await realpath(await mkdtemp(join(process.env.TMPDIR || tmpdir(), "termfiles-")));
 after(() => rm(base, { recursive: true, force: true }));
 let seq = 0;
@@ -818,6 +819,259 @@ test("dcPick: 조사(를·에서·を) × 금지 글자 표 — 모두 null", ()
   }
 });
 
+// protects=DC_POST · DC_LETTER · DC_HEAD 의 한글·가나·한자 범위가 \uXXXX 로만 적혀 있다(보이지 않는 글자가 소스에 글자 그대로 숨지 않게); fails_when=그 세 줄에 해당 범위의 글자가 그대로 있으면 실패; no_claim=정규식 의미는 안 본다
+test("termfiles.js: DC_POST · DC_LETTER · DC_HEAD 소스에 한글·가나·한자 글자가 그대로 없다", async () => {
+  const src = await readFile(new URL("../files-plus/termfiles.js", import.meta.url), "utf8");
+  const lines = src.split("\n").filter(l => /^const DC_(POST|LETTER|HEAD) /.test(l));
+  assert.equal(lines.length, 3);
+  for (const l of lines) for (const ch of l) {
+    const c = ch.codePointAt(0);
+    assert.ok(!((c >= 0x1100 && c <= 0x11ff) || (c >= 0x3040 && c <= 0x30ff) || (c >= 0x3130 && c <= 0x318f) || (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xac00 && c <= 0xd7ff)), `글자 그대로: U+${c.toString(16)} in ${l.slice(0, 20)}`);
+  }
+});
+
+// protects=보이지 않는 한글 채움 문자(U+115F · 1160 · 3164 · FFA0)가 이름 뒤 첫 꼬리 자리에도 뒤쪽 꼬리 자리에도 새지 못한다(공백처럼 보이는 선택이 열리던 구멍); fails_when=시작/꼬리 부류가 채움 문자를 받으면 실패; no_claim=표의 글자 밖 보이지 않는 글자는 보장 안 함
+test("dcPick: 보이지 않는 한글 채움 문자 × 첫 꼬리 · 뒤 꼬리 — 모두 null", () => {
+  for (const f of ["ᅟ", "ᅠ", "ㅤ", "ﾠ"]) {
+    for (const clip of [`a.md${f}사본`, `a.md사${f}본`, `docs/plan.md를${f}x`, `a.md${f}`]) {
+      const text = `x\na.md\ndocs/plan.md\n${clip}\n`;
+      assert.equal(dcPick({ clip, sel: one(3, 0, clip), cols: 80, text }), null, JSON.stringify(clip));
+    }
+  }
+  // 허용은 그대로: NFD 가나 · NFD 한글 · 자모 이음(U+1161–11FF) · 줄 꼬리
+  for (const [clip, want] of [["デ.pdfを".normalize("NFD"), "デ.pdf".normalize("NFD")], ["docs/plan.md를".normalize("NFD"), "docs/plan.md"], ["a.md#L12C3", "a.md"], ["a.mdあ゙", "a.md"]]) {
+    const text = `x\n${want}\n${clip}\n`;
+    assert.equal(dcPick({ clip, sel: one(2, 0, clip), cols: 80, text }), want, JSON.stringify(clip));
+  }
+});
+
+// protects=İ(U+0130 · 소문자화하면 두 글자)가 있어도 확장자 경계 인덱스가 어긋나 조각이 후보가 되지 않는다; fails_when=toLowerCase() 처럼 길이가 바뀌는 접기를 쓰면 실패; no_claim=그 밖 유니코드 대소문자 접기는 안 한다(확장자는 ASCII)
+test("scanText: İ 가 든 토큰도 경계가 어긋나지 않는다 · 대문자 ASCII 확장자는 그대로", () => {
+  assert.deepEqual(scanText("AİB.docx/x.md").cands, ["AİB.docx/x.md"]);
+  assert.deepEqual(scanText("İ.md.md").cands, ["İ.md.md"]);
+  assert.deepEqual(scanText("İa.md-를").cands, [], "확장자 뒤 `-` 는 경계가 아니다 — 조각(`İa.md-`)도 후보가 아니다");
+  assert.deepEqual(scanText("A.PDF").cands, ["A.PDF"]);
+  assert.deepEqual(scanText("Report.MD").cands, ["Report.MD"]);
+  const clip = "İa.md-를", text = `x\n${clip}\n`;
+  assert.equal(dcPick({ clip, sel: one(1, 0, clip), cols: 80, text }), null, "진짜 후보가 아닌 조각은 돌려주지 않는다");
+});
+
+// ── «더 긴 이름» 거부(dcLonger · dcChoose) ──
+// 터미널 글자 text 와 한 줄 선택 clip 으로 dcPick → dcLonger → 진짜 sh(RESOLVE_SCRIPT) → dcChoose. 임시 폴더만 쓴다.
+async function dcRun(dir, clip, text, row = 0) {
+  const sel = one(row, 0, clip), cand = dcPick({ clip, sel, cols: 80, text });
+  if (cand === null) return { cand, longer: [], got: null };
+  const longer = dcLonger({ clip, sel, text, cand });
+  const r = await sh(RESOLVE_SCRIPT, dir, [cand, ...longer]);
+  return { cand, longer, got: dcChoose(r.raw, cand, longer) };
+}
+
+test("dcChoose: 순수 — 더 긴 이름 레코드가 있으면 null · cand 하나면 그 경로 · 둘이면 null · 더 긴 파일만 있어도 null", () => {
+  const rec = (...p) => p.join("\0") + "\0";
+  assert.equal(dcChoose(rec("/w/a.md"), "a.md", ["a.md.bak"]), "/w/a.md");
+  assert.equal(dcChoose(rec("/w/a.md", "/w/a.md.bak"), "a.md", ["a.md.bak"]), null);
+  assert.equal(dcChoose(rec("/w/a.md.bak"), "a.md", ["a.md.bak"]), null, "더 긴 파일만 있으면 연다 안 한다");
+  assert.equal(dcChoose(rec("?a.md", "?a.md.bak"), "a.md", ["a.md.bak"]), null);
+  assert.equal(dcChoose(rec("/w/a.md", "/w/b/a.md"), "a.md", []), null, "같은 이름 둘");
+  assert.equal(dcChoose(rec("/w/docs/plan.md"), "docs/plan.md", ["docs/plan.md를"]), "/w/docs/plan.md");
+  assert.equal(dcChoose("", "a.md", []), null);
+  assert.equal(dcChoose(rec("/w/a.md"), "", []), null);
+});
+
+test("줄 끝 이름 + 다음 줄 머리 `.bak`: a.md.bak 이 있으면 아무것도 안 연다 · 없으면 a.md", async () => {
+  const text = "x\nsee a.md\n  .bak next\n";
+  const d = await fresh();
+  await touch(join(d, "a.md"));
+  assert.equal((await dcRun(d, "a.md", text, 1)).got, join(d, "a.md"), "a.md.bak 없음");
+  await touch(join(d, "a.md.bak"));
+  const r = await dcRun(d, "a.md", text, 1);
+  assert.deepEqual(r.longer, ["a.md.bak"]);
+  assert.equal(r.got, null, "a.md.bak 이 있다");
+  const d2 = await fresh();
+  await touch(join(d2, "a.md.bak"));
+  assert.equal((await dcRun(d2, "a.md", text, 1)).got, null, "더 긴 파일만 있어도 열지 않는다");
+  // [의도적 반전] 예전엔 data.json / l 이 `data.jsonl` 탐침을 내 null 이었다 → 이제 짧은 소문자 머리는 탐침 없음: 이름이 확장자 안에서 갈린 경우는 확인하지 않아 data.json 이 열린다(알려진 한계)
+  const d3 = await fresh();
+  await touch(join(d3, "data.json")); await touch(join(d3, "data.jsonl"));
+  const rl = await dcRun(d3, "data.json", "x\ndata.json\nl\n", 1);
+  assert.deepEqual(rl.longer, []); assert.equal(rl.got, join(d3, "data.json"));
+  // 다른 모양: plan.md를 / .bak
+  await touch(join(d3, "plan.md")); await touch(join(d3, "plan.md를.bak"));
+  assert.equal((await dcRun(d3, "plan.md를", "x\nplan.md를\n.bak\n", 1)).got, null);
+});
+
+test("ls -1 목록: a.md / b.md / c.md 모두 있어도 각자 자기 파일 · 거부 없음", async () => {
+  const d = await fresh();
+  for (const n of ["a.md", "b.md", "c.md"]) await touch(join(d, n));
+  const text = "ls -1\na.md\nb.md\nc.md\n";
+  for (const [i, n] of ["a.md", "b.md", "c.md"].entries()) assert.equal((await dcRun(d, n, text, i + 1)).got, join(d, n), n);
+});
+
+test("붙은 꼬리: 보고서.pdf사본 · data.csvの备份 — 긴 파일이 있으면 null · 없으면 짧은 파일 · 접두 탐침", async () => {
+  for (const [short, tail] of [["보고서.pdf", "사본"], ["data.csv", "の备份"]]) {
+    const clip = short + tail, text = `x\n${clip}\n`;
+    const both = await fresh();
+    await touch(join(both, short)); await touch(join(both, clip));
+    assert.equal((await dcRun(both, clip, text, 1)).got, null, `${clip} 도 있다`);
+    const only = await fresh();
+    await touch(join(only, short));
+    assert.equal((await dcRun(only, clip, text, 1)).got, join(only, short), `${short} 만 있다`);
+    const longOnly = await fresh();
+    await touch(join(longOnly, clip));
+    assert.equal((await dcRun(longOnly, clip, text, 1)).got, null, "짧은 파일이 없다");
+  }
+  const d = await fresh();
+  await touch(join(d, "보고서.pdf")); await touch(join(d, "보고서.pdf사본"));
+  const clip = "보고서.pdf사본을";
+  assert.equal((await dcRun(d, clip, `x\n${clip}\n`, 1)).got, null, "접두 탐침(보고서.pdf사본)");
+  const d2 = await fresh();
+  await touch(join(d2, "docs/plan.md"));
+  assert.equal((await dcRun(d2, "docs/plan.md를", "x\ndocs/plan.md를\n", 1)).got, join(d2, "docs/plan.md"), "plan.md를 파일은 없다");
+  // [의도적 반전] 예전엔 text 에 `cand + 글자줄` 이 없으면 짧은 파일을 열었다(fail-open) → 이제 한 줄 선택에서 꼬리를 확인 못 하면 아무것도 안 연다(fail-closed)
+  const d3 = await fresh();
+  await touch(join(d3, "a.md")); await touch(join(d3, "a.md를사본"));
+  const c3 = "a.md를사본", t3 = "x\na.md를\n";
+  assert.deepEqual(dcLonger({ clip: c3, sel: one(1, 0, c3), text: t3, cand: "a.md" }), []);
+  assert.equal((await dcRun(d3, c3, t3, 1)).cand, null, "한 줄 선택 · 꼬리가 text 에 없음 → 아무것도 안 연다");
+  assert.equal((await dcRun(d3, c3, t3, 1)).got, null);
+});
+
+test("dcPick fail-closed: 한 줄 선택 꼬리가 text 에 없으면 null · 있으면 열림 · 여러 줄 선택은 그대로", () => {
+  const clip = "docs/plan.md를";
+  assert.equal(dcPick({ clip, sel: one(1, 0, clip), cols: 80, text: "x\ndocs/plan.md를\n" }), "docs/plan.md");
+  assert.equal(dcPick({ clip, sel: one(1, 0, clip), cols: 80, text: "x\ndocs/plan.md\n" }), null, "꼬리 없음");
+  assert.equal(dcPick({ clip, sel: one(1, 0, clip), cols: 80, text: "x\ndocs/plan.md" + "\u1105\u1175\u11AF\n" }), null, "NFC 클립보드 · NFD 터미널");
+  assert.equal(dcPick({ clip: "a.md", sel: one(1, 0, "a.md"), cols: 80, text: "x\na.md\n" }), "a.md", "꼬리 없는 선택은 영향 없음");
+  // 여러 줄(줄바뀜) 선택: 꼬리를 text 에서 못 찾아도 예전처럼 연다(이어진 한 글이라 꼬리 위치를 신뢰 못 함)
+  const base = "/w/proj/" + "d".repeat(70) + "/x.txt", sel = S(4, 4, 5, 9);   // 76 + 10 = 86 칸 = base(84) + 를(2)
+  assert.equal(selSpan(sel, 80), 86);
+  assert.equal(dcPick({ clip: base.slice(0, 76) + "\n" + base.slice(76) + "를", sel, cols: 80, text: `echo\n${base}\n` }), base);
+});
+
+test("줄바꿈 탐침: Gemini 상자(│ a.md │ / │ .bak │) · Claude 들여쓰기 이음", () => {
+  const box = "x\n│ see a.md │\n│ .bak       │\n";
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: box, cand: "a.md" }), ["a.md.bak"]);
+  const indent = "x\n  see a.md\n    .bak\n";
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: indent, cand: "a.md" }), ["a.md.bak"]);
+  const tail = "x\n  docs/plan.md를\n    .bak\n";
+  assert.ok(dcLonger({ clip: "docs/plan.md", sel: one(1, 0, "docs/plan.md"), text: tail, cand: "docs/plan.md" }).includes("docs/plan.md를.bak"));
+});
+
+test("dcLonger: 탐침은 text 조각 + cand 로만 · 클립보드의 비밀 글은 어디에도 없다", () => {
+  const secret = "hunter2-S3cr3t";
+  const clip = "a.md를사본", cand = "a.md", text = `x\n${cand}를사본\n  .bak\nsee a.md\n .zip\n`;
+  const out = dcLonger({ clip, sel: one(1, 0, clip), text, cand });
+  assert.deepEqual([...out].sort(), ["a.md.zip", "a.md를", "a.md를사", "a.md를사본", "a.md를사본.bak"].sort());
+  for (const p of out) {
+    assert.ok(p.startsWith(cand) && p !== cand && !p.includes(secret), p);
+    assert.ok([...Array(p.length - cand.length + 1).keys()].some(i => { const j = cand.length + i; return text.includes(p.slice(0, j)) && (j === p.length || text.includes(p.slice(j))); }), `text 조각 둘 이하로 안 만들어짐: ${p}`);
+  }
+  // 클립보드가 비밀이면 dcLonger 는 꼬리 탐침을 내지 않고(줄바꿈 탐침만) 비밀은 어디에도 나오지 않는다
+  const sc = dcLonger({ clip: secret, sel: one(1, 0, secret), text, cand });
+  assert.deepEqual([...sc].sort(), ["a.md.zip", "a.md를사본.bak"]);
+  assert.ok(sc.every(p => !p.includes(secret)));
+  for (const bad of [null, undefined, 3]) assert.deepEqual(dcLonger({ clip: bad, sel: null, text, cand }).sort(), ["a.md.zip", "a.md를사본.bak"]);
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(0, 0, "a.md"), text: null, cand }), []);
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(0, 0, "a.md"), text, cand: "" }), []);
+});
+
+test("dcLonger: 상한 · 같은 이름 다른 폴더 줄 · 제어문자", () => {
+  const rep = Array.from({ length: 300 }, (_, i) => `a.md\n.s${i}`).join("\n");
+  const out = dcLonger({ clip: "a.md", sel: one(0, 0, "a.md"), text: rep, cand: "a.md" });
+  assert.equal(out.length, 4, `wrap 은 최대 4 개: ${out.length}`);
+  const big = Array.from({ length: 300 }, (_, i) => `${"x".repeat(180)} a.md${i % 2 ? "를사본" : ""}`).join("\n");
+  const b = dcLonger({ clip: "a.md를사본", sel: one(0, 0, "a.md를사본"), text: big, cand: "a.md" });
+  assert.ok(b.length <= DC_MAX_PROBES);
+  const many = "a.md" + "가".repeat(40);
+  const m = dcLonger({ clip: many, sel: one(0, 0, many), text: many, cand: "a.md" });
+  assert.ok(m.length >= 9 && m.length <= DC_MAX_PROBES && new Set(m).size === m.length);
+  assert.ok(m.every(p => p.startsWith("a.md") && p !== "a.md"));
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(0, 0, "a.md"), text: "a.md\n\u0007x\n", cand: "a.md" }), [], "제어문자 든 탐침은 안 낸다");
+});
+
+test("dcLonger: 상한 — 꼬리 9 + 줄바꿈 4 = 13 개가 모두 남는다(옛 상한 12 에 줄바꿈이 밀리지 않는다)", () => {
+  assert.ok(DC_MAX_PROBES >= 13);
+  const clip = "a.md가나다라마바사아자차", cand = "a.md";
+  const text = `x\n${clip}\n` + Array.from({ length: 6 }, (_, i) => `a.md\n.s${i}`).join("\n") + "\n";
+  const out = dcLonger({ clip, sel: one(1, 0, clip), text, cand });
+  assert.equal(out.length, 13, JSON.stringify(out));
+  assert.equal(out.length, DC_MAX_PROBES);
+  assert.equal(out.filter(p => /\.s\d$/.test(p)).length, 4, "줄바꿈 탐침 4 개 모두");
+  assert.equal(out.filter(p => p.startsWith("a.md가")).length, 9, "꼬리 탐침 9 개(전체 + 앞 8 글자씩)");
+  // 줄바꿈 탐침이 4 개를 넘게 만들어져도 총수는 상한 이하(꼬리·줄바꿈 한도가 각자 막는다)
+  const huge = Array.from({ length: 300 }, (_, i) => `${clip}\n.s${i}`).join("\n");
+  const h = dcLonger({ clip, sel: one(0, 0, clip), text: huge, cand });
+  assert.ok(h.length <= DC_MAX_PROBES);
+});
+
+// protects=클립보드에만 있는 글(post)이 탐침에 들어가지 않는다 — 탐침은 늘 text 조각 + cand; fails_when=탐침을 `cand + p.post` 로 만들면 실패; no_claim=text 에 실제로 있는 글의 비밀성
+test("dcLonger: 클립보드에만 있는 post 글은 어떤 탐침에도 안 들어간다(placeholder)", () => {
+  const text = "x\na.md를\n.bak\n", cand = "a.md";
+  // 클립보드 post 가 허용 모양(한글 글자줄)이고 text 에는 없는 경우 · 허용 모양 밖(ASCII)인 경우 — 둘 다 text 에서 나온 탐침만 남는다
+  for (const clip of ["a.md를비밀값", "a.md를。PLACEHOLDERSECRET", "a.md를。비밀값"]) {
+    const out = dcLonger({ clip, sel: one(1, 0, clip), text, cand });
+    assert.ok(out.every(p => !/PLACEHOLDERSECRET|비밀값/.test(p)), JSON.stringify(out));
+    // 허용되는 것은 text 에서 자른 조각뿐: 줄바꿈 탐침 + (post 앞부분 `를` 이 text 에 있으면) 꼬리 탐침
+    assert.deepEqual([...out].sort(), clip === "a.md를。비밀값" ? ["a.md를", "a.md를.bak"] : ["a.md를.bak"], clip);
+  }
+});
+
+test("dcLonger: 다음 줄 비밀 글이 탐침으로 새지 않는다(placeholder)", () => {
+  const text = "$ cat token.txt\nPLACEHOLDERSECRET\n";
+  const out = dcLonger({ clip: "token.txt", sel: one(0, 6, "token.txt"), text, cand: "token.txt" });
+  assert.deepEqual(out, []);
+  assert.ok(out.every(p => !p.includes("PLACEHOLDERSECRET")));
+});
+
+// protects=줄바꿈 탐침에 붙는 다음 줄 머리가 좁은 두 모양(점 확장자 · 한글/가나 글자줄)뿐이다; fails_when=허용 밖 글자(글롭 · 대문자 · 짧은 소문자·숫자 `l`/`abcd`/`123` · 17자 확장자 · 9자 한글 · `/` · `=`)로 탐침이 만들어지면 또는 허용 모양이 막히면 실패; no_claim=이름이 확장자 안에서 갈린 경우(`l`)는 확인하지 않는다
+test("dcLonger: 다음 줄 머리 모양 표 — 허용 2 모양 통과 · 금지는 탐침 없음(옛 허용 `l` `abcd` `123` 은 이제 탐침 없음으로 반전)", () => {
+  const probe = (head) => dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: `x\nsee a.md\n${head}\n`, cand: "a.md" });
+  for (const ok of [".bak", ".old", ".a-b_c", "사본", "사본가나다라마", "ー가", "・가"]) assert.deepEqual(probe(ok), ["a.md" + ok], ok);
+  const bad = ["l", "abcd", "123", "on", "app", "0000", "*", "?", "[x", "\\x", ".b*k", "l*", "사*본", "ABC", "Abc", ".BAK_" + "x".repeat(16), "abcde", "123456", "." + "a".repeat(16), "사본가나다라마바사아", "/etc", "=x", "-x", "x/y", ".b/k"];
+  for (const b of bad) assert.deepEqual(probe(b), [], JSON.stringify(b));
+  // `.` + 15 자는 허용 · 16 자는 금지
+  assert.equal(probe("." + "a".repeat(15)).length, 1);
+  // 머리 글자 핀: 한글 8 자 허용 · 9 자 거부 · 한자 시작 · 한글 채움(U+3164) 시작 거부
+  assert.deepEqual(probe("가나다라마바사아"), ["a.md가나다라마바사아"]);
+  for (const b of ["가나다라마바사아자", "备份", "\u3164사본", "\u3164"]) assert.deepEqual(probe(b), [], JSON.stringify(b));
+  // 회귀: 영어 문장이 줄바꿈으로 갈려도 `config.json` 류를 탐침하지 않는다(`config.js` + `on` → `config.json`)
+  const prose = (line, next, cand) => dcLonger({ clip: cand, sel: one(1, 0, cand), text: `x\n${line}\n${next}\n`, cand });
+  assert.deepEqual(prose("I updated config.js", "on the server", "config.js"), []);
+  assert.deepEqual(prose("I updated App.js", "on", "App.js"), []);
+});
+
+test("dcLonger: 글롭 글자 든 탐침은 거부 · 마지막 조각 255 단위(UTF-16) 초과 거부 · 같은 이름은 안 낸다", () => {
+  // 꼬리 장식의 글롭(`a.md*` + 다음 줄 `.bak`)은 post 모양 검사(글자줄이 아님)가 먼저 막는다 — push 의 GLOB 검사까지 가지 않는다
+  for (const d of ["*", "?"]) assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: `x\nsee a.md${d}\n.bak\n`, cand: "a.md" }), [], JSON.stringify(d));
+  // 이름 길이 상한은 UTF-16 글자 단위(255): 한글 250 자 꼬리 → 전체 254 단위 통과 · 252 자 꼬리 → 전체 256 단위 탈락. (바이트로 세면 86 자부터 탈락해 유효한 긴 이름의 탐침이 빠졌다)
+  assert.equal(NAME_MAX_UNITS, 255);
+  for (const [n, full] of [[250, true], [251, true], [252, false]]) {
+    const long = "가".repeat(n), clip = "a.md" + long, t2 = `x\n${clip}\n`;
+    const o2 = dcLonger({ clip, sel: one(1, 0, clip), text: t2, cand: "a.md" });
+    assert.ok(o2.every(p => p.slice(p.lastIndexOf("/") + 1).length <= NAME_MAX_UNITS), String(n));
+    assert.equal(o2.includes(clip), full, `n=${n}`);
+    assert.ok(o2.includes("a.md" + "가".repeat(8)), "앞 8 글자 탐침은 남는다");
+  }
+  // 바이트로는 255 를 넘지만(86 자 = 258 B) 단위로는 넘지 않는 이름의 탐침은 남는다
+  const c86 = "a.md" + "가".repeat(86);
+  assert.ok(utf8Len("가".repeat(86)) > 255 && dcLonger({ clip: c86, sel: one(1, 0, c86), text: `x\n${c86}\n`, cand: "a.md" }).includes(c86));
+  // 폴더가 길어도 마지막 조각만 잰다
+  const dir = "d".repeat(100) + "/", c3 = dir + "a.md";
+  assert.deepEqual(dcLonger({ clip: c3, sel: one(1, 0, c3), text: `x\nsee ${c3}\n.bak\n`, cand: c3 }), [c3 + ".bak"]);
+  // 같은 이름(cand 와 마지막 조각이 같음)은 탐침으로 안 낸다 — 탐침은 늘 cand 의 접두 확장이라 모든 출력이 이름이 다르다
+  for (const [t, c] of [["x\nsee docs/a.md\n.bak\n", "docs/a.md"], ["x\na.md가나\n", "a.md"]]) {
+    for (const p of dcLonger({ clip: c + "가", sel: one(1, 0, c), text: t, cand: c })) assert.notEqual(p.slice(p.lastIndexOf("/") + 1), c.slice(c.lastIndexOf("/") + 1));
+  }
+});
+
+// protects=줄바꿈 탐침의 거름(앞 줄 접두 · 허용 꼬리 · 다음 줄 첫 글자)이 모두 [] 를 낸다; fails_when=세 케이스 중 하나라도 탐침을 내면 실패(앞 접두 DC_PRE 만 단독으로 막는 케이스 — 허용 꼬리 · 괄호 케이스는 다른 검사와 겹쳐 한 검사만 지워서는 실패하지 않는다; isCut 은 `(  .b` 케이스가 단독 방어); no_claim=이름이 줄 머리에 있는 경우
+test("줄바꿈 탐침 음성: 다른 폴더 이름 · 확장자 뒤 더 이어짐 · 괄호로 시작하는 다음 줄", () => {
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: "x\nsee docs/a.md\n  .bak\n", cand: "a.md" }), [], "앞 접두(docs/)");
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: "x\nsee a.md.bak\n  .old\n", cand: "a.md" }), [], "허용 꼬리 밖(.bak)");
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: "x\nsee a.md\n(.bak)\n", cand: "a.md" }), [], "다음 줄 첫 글자");
+  assert.deepEqual(dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: "x\nsee a.md\n(  .b\n", cand: "a.md" }), [], "isCut 단독 방어 — 이 검사가 없으면 a.md.b");
+});
+
 test("dcStep: cols 가 바뀌면 기준선(fire 없음) · 그 뒤 reflowMs 안의 key 변화도 기준선 · 지나면 정상", () => {
   const a = S(3, 0, 3, 5), b = S(4, 0, 4, 5);
   let r = dcStep(null, { addr: "a", sel: a, cols: 80, now: 0 });
@@ -857,4 +1111,49 @@ test("selKey: null → null · 정상 → r:c-r:c · 모양 틀림 → null", ()
   assert.equal(selKey(S(1, 2, 3, 4)), "1:2-3:4");
   assert.equal(selKey({ start: {}, end: {} }), null);
   assert.equal(selKey({ start: cell(1, 2) }), null);
+});
+
+test("dcLonger: 같은 줄 cand 뒤 글(post)은 없음 · 글자 8 자 이하만 탐침에 실린다(`.` · `#L41` · 9 자는 거부)", () => {
+  const run = (line, next, cand) => dcLonger({ clip: cand, sel: one(1, 0, cand), text: `x\n${line}\n${next}\n`, cand });
+  const clause = "を更新して、テスト用のファイルを作成しました";
+  assert.deepEqual(run("config.yaml" + clause, "ok", "config.yaml"), []);
+  assert.deepEqual(run("see a.md#L4111111111111111", ".bak", "a.md"), []);
+  assert.deepEqual(run("x a.md" + "가".repeat(40), "abcd", "a.md"), []);
+  // [의도적 반전] 예전엔 `a.md.` / `bak` 이 `a.md.bak` 탐침을 냈다 → 이제 post `.` · 짧은 소문자 머리 모두 불허: 확장자 안에서 갈린 이름은 확인하지 않는다
+  assert.deepEqual(run("see a.md.", "bak", "a.md"), []);
+  assert.deepEqual(run("see a.md.", ".bak", "a.md"), []);
+  assert.deepEqual(run("see a.md#L41", ".bak", "a.md"), [], "#L41 post");
+  assert.deepEqual(run("see a.md" + "가".repeat(9), ".bak", "a.md"), [], "글자 9 자 post");
+  assert.deepEqual(run("  docs/plan.md를", ".bak", "docs/plan.md"), ["docs/plan.md를.bak"]);
+  assert.deepEqual(run("see a.md" + "가".repeat(8), ".bak", "a.md"), ["a.md" + "가".repeat(8) + ".bak"]);
+});
+
+test("dcLonger: 줄 끝이 닫는 장식이면 줄바꿈 탐침 없음 · 맨 이름은 그대로 탐침", () => {
+  const run = (line, next, cand) => dcLonger({ clip: cand, sel: one(1, 0, cand), text: `x\n${line}\n${next}\n`, cand });
+  assert.deepEqual(run("built (x.js)", ".map files are emitted too", "x.js"), []);
+  assert.deepEqual(run("built 'x.js'", ".map files are emitted too", "x.js"), []);
+  assert.deepEqual(run("built `x.js`", ".map files are emitted too", "x.js"), []);
+  assert.deepEqual(run("「보고서.pdf」", "사본도", "보고서.pdf"), []);
+  assert.deepEqual(run("see x.js", ".map", "x.js"), ["x.js.map"]);
+});
+
+test("dcChoose: 닫는 장식 줄 끝의 x.js 는 x.js.map 이 있어도 열린다(끝에서 끝)", async () => {
+  const d = await mkdtemp(join(base, "dcw-"));
+  await writeFile(join(d, "x.js"), "1");
+  await writeFile(join(d, "x.js.map"), "2");
+  const text = "x\nbuilt (x.js)\n.map files are emitted too\n";
+  const sel = one(1, 7, "x.js");
+  const cand = dcPick({ clip: "x.js", sel, cols: 80, text });
+  assert.equal(cand, "x.js");
+  const longer = dcLonger({ clip: "x.js", sel, text, cand });
+  const r = await sh(RESOLVE_SCRIPT, d, [cand, ...longer]);
+  assert.equal(dcChoose(r.raw, cand, longer), join(d, "x.js"));
+});
+
+test("dcLonger: 다음 줄 머리는 한 낱말 전체여야 한다(뒤가 줄 끝 · 공백 · 상자선)", () => {
+  const run = (next) => dcLonger({ clip: "a.md", sel: one(1, 0, "a.md"), text: `x\nsee a.md\n${next}\n`, cand: "a.md" });
+  // 모양은 맞지만(점 확장자 · 한글 글자줄) 뒤가 `=` `<` `(` 로 이어져 낱말의 앞부분일 뿐 → 탐침 없음
+  for (const bad of [".bak=1 2 3", ".old<rest", "사본(마바사"]) assert.deepEqual(run(bad), [], bad);
+  assert.deepEqual(run("사본 rest"), ["a.md사본"]);
+  assert.deepEqual(run("│ .bak │"), ["a.md.bak"]);
 });

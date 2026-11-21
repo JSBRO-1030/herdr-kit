@@ -162,7 +162,7 @@ node --test tests/files-plus.test.mjs tests/state.test.mjs tests/termfiles.test.
 
 - `files-plus.test.mjs`: mod 가 쓰는 `kinds.js` · `transfer.js` 를 그대로 불러, 진짜 `hc exec` 로 올리기 · 내려받기를 돌립니다. 크기 경계, 이상한 이름, 덮어쓰지 않기, 동시 전송, 취소, 격리 속성을 봅니다.
 - `state.test.mjs`: 공통 계약 `state.js`(요청함 · 요약 · 막대 · 속도 · 기록 묶음 · throttle · owner 복원)를 봅니다.
-- `termfiles.test.mjs`: `termfiles.js` 순수 함수(파일 이름 후보 · 줄 잇기 · 풀기/찾기 스크립트 · 더블클릭 `cellWidth` · `selSpan` · `dcStep` · `dcPick`)를 합성 경로로 봅니다.
+- `termfiles.test.mjs`: `termfiles.js` 순수 함수(파일 이름 후보 · 줄 잇기 · 풀기/찾기 스크립트 · 더블클릭 `cellWidth` · `selSpan` · `dcStep` · `dcPick` · `dcLonger` · `dcChoose`)를 합성 경로로 봅니다.
 - 결과(2026-11-15, Mac): `state.test.mjs` 32/32 통과 · `files-plus.test.mjs` 12/13 통과(실패 1 = `/dev/shm` 을 쓰는 리눅스 전용 시험이라 macOS 에서는 `mkdtemp` 가 못 만든다).
 - 화면 검사: `HAPP=<준비한 폴더> sh tests/linux-app-check.sh files-plus` 로 리눅스 앱의 `herdr-app check` 를 격리해 돌립니다. 준비물은 그 파일 머리에 적었습니다.
 

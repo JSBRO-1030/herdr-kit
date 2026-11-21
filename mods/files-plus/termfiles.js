@@ -98,7 +98,8 @@ function fromTokenRaw(tok) {
   if (!tok || utf8Len(tok) > MAX_TOKEN_BYTES) return [];
   tok = stripDeco(tok);
   if (!tok || GLOB.test(tok) || CTRL.test(tok)) return [];
-  const lower = tok.toLowerCase();
+  // [주의] toLowerCase() 는 `İ`(U+0130) 같은 글자의 길이를 바꿔 인덱스가 tok 와 어긋난다 → 길이를 지키는 ASCII A–Z 만 접는다(TERM_EXTS 는 전부 ASCII).
+  const lower = tok.replace(/[A-Z]+/g, s => s.toLowerCase());
   // 경계: `.<ext>` 의 끝 위치. 같은 점에서는 가장 긴 확장자 하나. 뒤가 토큰 끝이거나 글자(붙은 확장자)일 때만 경계다 —
   // `report.html.bak` 의 `.html` 뒤는 `.` 이므로 경계가 아니다(= `.bak` 백업은 후보가 아니다).
   // 코드 확장자는 영숫자(ASCII)가 바로 붙으면 경계가 아니다 — `x.config` 가 `x.conf` 로, `a.class` 가 `a.c` 로 잘리지 않게(한글 등은 붙은 확장자로 본다).
@@ -467,30 +468,141 @@ export function dcStep(state, { addr, sel, cols, now, prevKey }, { settleMs = 40
 }
 
 // dcPick allowlist(QuickJS: `u` 플래그·\p{} 없음 → \uXXXX 범위). pre = `*` · 여는 괄호/따옴표. post = `#L12C3` 꼬리 → 닫는 장식 → (한글·가나로 시작하는 조사 + 꼬리 한 부류).
-// 이어짐 시작 = 한글·가나만(ᄀ-ᅟ · ぀-ヿ · ㄰-㆏ · 가-힣 — 한자 시작 불허). 꼬리 = 한글 자모·가나·호환 자모·한자·완성형 한글·닫는 장식뿐. ASCII 글자·숫자·`/`·`=`·결합/제어 부호·공백은 어디서든 불허.
+// 이어짐 시작 = 한글·가나만(U+1100–115E · 3040–30FF · 3131–3163 · 3165–318E · AC00–D7A3 — 한자 시작 불허). 꼬리 = 한글 자모(1161–11FF · D7B0–D7FF 포함)·가나(결합 탁점 3099/309A 포함)·호환 자모·한자·완성형 한글·닫는 장식뿐.
+// 보이지 않는 한글 채움 문자(U+115F · 1160 · 3164 · FFA0)는 시작에도 꼬리에도 불허 — `a.md` + 채움 + `사본` 이 공백으로 나뉜 선택처럼 보이지만 열리는 일이 없게. ASCII 글자·숫자·`/`·`=`·결합/제어 부호·공백도 어디서든 불허.
 const DC_PRE = /^[*「『«“‘【《〈]*$/;
-const DC_POST = /^(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)?[*?!。、.,;:」』»”’】》〉]*(?:[\u1100-\u115F\u3040-\u30FF\u3130-\u318F\uAC00-\uD7A3][\u1100-\u11FF\uD7B0-\uD7FF\u3040-\u30FF\u3130-\u318F\u4E00-\u9FFF\uAC00-\uD7A3*?!。、.,;:」』»”’】》〉]*)?$/;
-// 클립보드 + 선택 + 터미널 글자 → 풀어 볼 후보 글(없으면 null). 클립보드는 고르는 데만 쓴다:
-//  1) 정리(끝 개행 하나 · 여러 줄 선택이면 안쪽 개행도 뺀다 — 한 곳) · 비었거나 1024 자 넘으면 null
-//  2) cellWidth(clip) === selSpan 이어야 한다(다르면 선택과 클립보드가 다른 것 — 낡은 클립보드)
-//  3) 공백이 든 글은 null · scanText(clip) 후보가 정확히 하나(own)여야 한다. clip = 앞 `*` + own + 뒤 장식(`#L12C3` · `#L1-L3` · `*?!。、.,;:」`) · 앞 `*「` · 붙은 한글/가나/CJK 조사(`plan.md를`)뿐일 때만 통과(allowlist) — 그 밖의 앞뒤 글자(`.jsonl` · `.bak` · `.gz`)가 있으면 다른 이름이라 null
-//  4) 터미널 글자 전체(상한 없음)의 scanText(text).cands 에 own 이 그대로 있어야 한다 → 터미널 쪽 사본을 돌려준다
-// [경고] 클립보드는 믿을 수 없는 입력(비밀번호 · 다른 앱의 글)이다. 터미널 글자에 없는 글은 절대 돌려주지 않는다 — 반환값은 늘 터미널 글자에서 나온 후보다.
-export function dcPick({ clip, sel, cols, text }) {
+const DC_POST = /^(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)?[*?!。、.,;:」』»”’】》〉]*(?:[\u1100-\u115E\u3040-\u30FF\u3131-\u3163\u3165-\u318E\uAC00-\uD7A3][\u1100-\u115E\u1161-\u11FF\uD7B0-\uD7FF\u3040-\u30FF\u3131-\u3163\u3165-\u318E\u4E00-\u9FFF\uAC00-\uD7A3*?!。、.,;:」』»”’】》〉]*)?$/;
+// 꼬리 «글자» 부류(장식 · 구두점 없음) = DC_POST 꼬리에서 글자만 · 시작 부류 = 글자 중 한자 · 자모 이음 부호를 뺀 것.
+const DC_LETTER = /^[\u1100-\u115E\u1161-\u11FF\uD7B0-\uD7FF\u3040-\u30FF\u3131-\u3163\u3165-\u318E\u4E00-\u9FFF\uAC00-\uD7A3]$/;
+const DC_HEAD = /^[\u1100-\u115E\u3040-\u30FF\u3131-\u3163\u3165-\u318E\uAC00-\uD7A3]$/;
+
+// 클립보드 정리: 끝 개행 하나 · 여러 줄 선택이면 안쪽 개행도 뺀다 · 비었거나 1024 자 넘으면 null. (dcPick · dcLonger 가 같이 쓴다)
+function dcWord(clip, sel) {
   if (typeof clip !== "string") return null;
   const o = orderSel(sel);
   if (!o) return null;
   let w = clip.replace(/\r?\n$/, "");
   if (o.e.row > o.s.row) w = w.replace(/\r?\n/g, "");
-  if (!w || w.length > 1024) return null;
-  const span = selSpan(sel, cols);
-  if (span === null || cellWidth(w) !== span) return null;
+  return !w || w.length > 1024 ? null : w;
+}
+// 정리된 클립보드 → { own, pre, post }(공백이 있거나 후보가 정확히 하나가 아니면 null). 허용 목록은 부르는 쪽이 건다.
+function dcParts(w) {
   if (/\s/.test(w)) return null;
   const own = scanText(w).cands;
   if (own.length !== 1) return null;
   const i = w.indexOf(own[0]);
-  if (i < 0) return null;
-  const pre = w.slice(0, i), post = w.slice(i + own[0].length);
-  if (!DC_PRE.test(pre) || !DC_POST.test(post)) return null;   // 장식 · 붙은 조사만 허용 — `data.jsonl` 처럼 이름이 라틴 글자·숫자로 더 이어지면 다른 파일
-  return scanText(text, { max: Infinity, maxCode: Infinity }).cands.find(c => c === own[0]) ?? null;
+  return i < 0 ? null : { own: own[0], pre: w.slice(0, i), post: w.slice(i + own[0].length) };
+}
+
+// 꼬리 앞 장식(`#L12C3` · 닫는 장식)을 뗀 나머지가 글자로 «바로» 시작할 때만 그 글자줄(글자 배열 · 첫 글자는 DC_HEAD · 나머지 DC_LETTER)을 돌려준다. 아니면 []. (dcPick · dcLonger 공용)
+const DC_DECO = /^(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)?[*?!\u3002\u3001.,;:\u300D\u300F\u00BB\u201D\u2019\u3011\u300B\u3009]*/;
+function dcTailRun(post) {
+  const rest = post.replace(DC_DECO, "");
+  if (!rest || rest !== post) return [];
+  const run = [];
+  for (const ch of rest) { if (!DC_LETTER.test(ch) || (run.length === 0 && !DC_HEAD.test(ch))) break; run.push(ch); }
+  return run;
+}
+// 줄바꿈 탐침에 붙일 다음 줄 머리 모양(좁게): `.bak` 류 점 확장자 · 한글/가나 글자로 시작해 한글/가나/한자로 이어지는 1–8 글자(`사본`). 그 밖은 탐침을 만들지 않는다.
+// [경고] 다음 줄의 임의 글이 exec 인자(프로세스 목록 · 원격 호스트)로 새지 않게 모양을 좁혔다.
+// [주의] 짧은 소문자·숫자 토큰(`on` · `l` · 4 자리 코드)은 argv 로 가지 않는다(`I updated config.js` / `on the server` 가 `config.json` 을 오탐하는 것을 막음). 이름이 확장자 «안» 에서 갈린 경우(`data.json` / `l` · `a.md.` / `bak`)는 확인하지 않는다 → 짧은 이름이 열릴 수 있다.
+const DC_WRAP_HEAD = /^\.[A-Za-z0-9_-]{1,15}$/;
+function dcWrapHeadOk(h) {
+  if (DC_WRAP_HEAD.test(h)) return true;
+  const c = [...h];
+  return c.length >= 1 && c.length <= 8 && DC_HEAD.test(c[0]) && c.slice(1).every(ch => DC_LETTER.test(ch));
+}
+export const NAME_MAX_UNITS = 255, DC_TAIL_STEPS = 8, DC_MAX_WRAP = 4, DC_MAX_PROBES = (DC_TAIL_STEPS + 1) + DC_MAX_WRAP;   // 꼬리(전체 + 앞 8 글자씩) 9 + 줄바꿈 4 = 13 — 줄바꿈 탐침이 상한에 밀려 빠지지 않게
+
+// 클립보드 + 선택 + 터미널 글자 → 풀어 볼 후보 글(없으면 null). 클립보드는 고르는 데만 쓴다:
+//  1) 정리(dcWord) · 2) cellWidth(clip) === selSpan 이어야 한다(다르면 선택과 클립보드가 다른 것 — 낡은 클립보드)
+//  3) 공백이 든 글은 null · scanText(clip) 후보가 정확히 하나(own)여야 한다. clip = 앞 `*` + own + 뒤 장식(`#L12C3` · `#L1-L3` · `*?!。、.,;:」`) · 앞 `*「` · 붙은 한글/가나/CJK 조사(`plan.md를`)뿐일 때만 통과(allowlist) — 그 밖의 앞뒤 글자(`.jsonl` · `.bak` · `.gz`)가 있으면 다른 이름이라 null
+//  4) 터미널 글자 전체(상한 없음)의 scanText(text).cands 에 own 이 그대로 있어야 한다 → 터미널 쪽 사본을 돌려준다
+// [경고] 클립보드는 믿을 수 없는 입력(비밀번호 · 다른 앱의 글)이다. 터미널 글자에 없는 글은 절대 돌려주지 않는다 — 반환값은 늘 터미널 글자에서 나온 후보다.
+// [주의] 허용 목록은 `data.csvの备份` · `보고서.pdf사본` 처럼 «더 긴 이름» 인 선택도 통과시킨다(승인된 `config.yamlを更新しました` 와 글자만으로는 구별 불가) → 더 긴 이름이 실제로 있는지는 dcLonger + dcChoose 가 파일 시스템으로 가린다.
+export function dcPick({ clip, sel, cols, text }) {
+  const w = dcWord(clip, sel);
+  if (w === null) return null;
+  const span = selSpan(sel, cols);
+  if (span === null || cellWidth(w) !== span) return null;
+  const p = dcParts(w);
+  if (!p || !DC_PRE.test(p.pre) || !DC_POST.test(p.post)) return null;   // 장식 · 붙은 조사만 허용 — `data.jsonl` 처럼 이름이 라틴 글자·숫자로 더 이어지면 다른 파일
+  const own = scanText(text, { max: Infinity, maxCode: Infinity }).cands.find(c => c === p.own) ?? null;
+  if (own === null) return null;
+  // [주의] 한 줄 선택에서 꼬리(글자줄)가 터미널 글자에 없으면 더 긴 이름을 확인할 수 없다(읽은 줄 밖 · NFC/NFD 차이) → 짧은 파일도 열지 않는다(fail-closed). 여러 줄(줄바뀜) 선택은 그대로.
+  const o = orderSel(sel), run = dcTailRun(p.post);
+  if (o.s.row === o.e.row && run.length && !text.includes(own + run.join(""))) return null;
+  return own;
+}
+
+// «더 긴 이름» 탐침(순수) — cand 에 글자가 더 붙은 이름이 진짜 있으면 열지 않기 위해(dcChoose) RESOLVE_SCRIPT 에 같이 보낼 글들. 최대 DC_MAX_PROBES(13) 개.
+//  · 꼬리 탐침: 클립보드 post 가 글자(한글·가나·한자)로 바로 시작하고 text 에 `cand + 글자줄` 이 그대로 있으면 → cand + 글자줄의 앞 k 글자(k=1..8) + 전체.
+//    text 에 없으면 탐침 없음(한 줄 선택이면 dcPick 이 이미 null 로 막는다 · 여러 줄 선택은 줄바꿈 탐침만).
+//  · 줄바꿈 탐침: 줄 끝 토큰이 cand(+ 허용 꼬리)로 끝나고 다음 줄 머리가 «좁은 이어짐 모양»(dcWrapHeadOk)이면 → cand + 그 꼬리 + 다음 줄 머리 토큰(`a.md` / `.bak` → `a.md.bak`). 최신 줄부터 4 개까지.
+//  · 모든 탐침: 글롭 글자 · 제어문자 없음 · 마지막 조각 255 단위(UTF-16) 이하 · cand 와 이름이 같지 않음.
+// [경고] 클립보드는 믿을 수 없는 입력이다 — 모든 탐침은 text 에서 자른 조각 + cand(터미널 쪽 후보)로만 만든다. 클립보드 글 자체는 어떤 탐침에도 들어가지 않는다.
+// [주의] 줄바꿈은 바로 다음 한 줄만 본다 · 이름이 줄 머리에 있고 앞 줄이 `docs/` 로 끝나는 거울 경우는 보지 않는다.
+export function dcLonger({ clip, sel, text, cand }) {
+  if (typeof cand !== "string" || !cand || typeof text !== "string") return [];
+  const out = [], seen = new Set([cand]);
+  const baseOf = (s) => s.slice(s.lastIndexOf("/") + 1);
+  const cb = baseOf(cand);
+  const push = (s) => {
+    // 방어: 호출 구조상 out.length 는 상한(13)에 닿지 않는다(꼬리 9 + 줄바꿈 4)
+    if (out.length >= DC_MAX_PROBES || seen.has(s) || CTRL.test(s) || GLOB.test(s) || utf8Len(s) > MAX_TOKEN_BYTES) return;
+    const b = baseOf(s);
+    // 방어: b === cb 는 seen(cand) 과 DC_POST 로 이미 걸러진다
+    if (b === cb || b.length > NAME_MAX_UNITS) return;
+    seen.add(s); out.push(s);
+  };
+  // 꼬리 탐침
+  const w = dcWord(clip, sel), p = w === null ? null : dcParts(w);
+  if (p && p.own === cand && DC_PRE.test(p.pre) && DC_POST.test(p.post)) {
+    const run = dcTailRun(p.post), full = run.join(""), at = full ? text.indexOf(cand + full) : -1;
+    if (at >= 0) {
+      push(text.slice(at, at + cand.length + full.length));
+      let len = cand.length;
+      for (let k = 0; k < Math.min(run.length, DC_TAIL_STEPS); k++) { len += run[k].length; push(text.slice(at, at + len)); }
+    }
+  }
+  // 줄바꿈 탐침
+  const lines = text.split(/\r\n|\n|\r/);
+  let nWrap = 0;
+  for (let i = lines.length - 2; i >= 0 && nWrap < DC_MAX_WRAP; i--) {
+    const ce = coreEnd(lines[i]);
+    if (!ce || isCut(ce[ce.length - 1])) continue;   // 줄 끝이 닫는 장식(`)` · `'` · `」` …)이면 이름이 줄 끝에서 끊긴 게 아니다 → 줄바꿈 탐침 없음
+    const T = lastTok(ce), k = T.indexOf(cand);
+    if (k < 0 || !DC_PRE.test(T.slice(0, k))) continue;
+    const post = T.slice(k + cand.length);
+    // [경고] 같은 줄 cand 뒤 글(post)은 «없음 · 글자 8 자 이하» 만 탐침에 싣는다 — 일본어 절 · `#L…` 숫자열 · 긴 글자열이 sh -c 인자로 새지 않게.
+    if (!DC_POST.test(post)) continue;   // 방어: 아래 글자줄 검사가 더 좁다
+    if (post !== "" && !(dcTailRun(post).join("") === post && [...post].length <= DC_TAIL_STEPS)) continue;
+    const n = coreStart(lines[i + 1]);
+    if (!n || isCut(n[0]) || WS.test(n[0])) continue;
+    const h = firstTok(n);
+    if (!dcWrapHeadOk(h)) continue;
+    // [주의] 머리 토큰은 «한 낱말» 이어야 한다 — 뒤가 줄 끝 · 공백 · 상자선이 아니면(`abc=1 2` · `가나(마` · `.bak=1 2`) 낱말의 앞부분일 뿐이라 탐침 없음.
+    const after = n[h.length];
+    if (after !== undefined && !WS.test(after) && !isBox(after)) continue;
+    const before = out.length;
+    push(cand + post + h);
+    if (out.length > before) nWrap++;
+  }
+  return out;
+}
+
+// RESOLVE_SCRIPT 출력 + cand + 탐침들 → 열 절대 경로(없으면 null). 레코드 이름(= 준 이름의 마지막 조각)으로 짝을 짓는다.
+//  · 탐침(더 긴 이름) 이름의 파일이 하나라도 나오면 null — 더 긴 파일만 있어도 연다 안 한다(미리보기 못 하는 종류일 수 있고 원격이면 내려받는다)
+//  · 아니면 cand 이름의 레코드가 정확히 하나일 때만 그 경로
+export function dcChoose(stdout, cand, longer = []) {
+  if (typeof cand !== "string" || !cand) return null;
+  const baseOf = (s) => s.slice(s.lastIndexOf("/") + 1);
+  const cb = baseOf(cand), lb = new Set(longer.map(baseOf));
+  const hits = [];
+  for (const r of parseResolved(stdout, { max: Infinity })) {
+    const b = baseOf(r);
+    if (lb.has(b) && b !== cb) return null;
+    if (b === cb) hits.push(r);
+  }
+  return hits.length === 1 ? hits[0] : null;
 }
