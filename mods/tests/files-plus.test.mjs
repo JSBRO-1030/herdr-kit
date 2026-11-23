@@ -1182,17 +1182,43 @@ test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_
   assert.equal(execs.length, 2, "exec 호출은 둘뿐");
   assert.ok(execs[0].includes('await exec("/bin/sh", ["-c", "LC_ALL=en_US.UTF-8 /usr/bin/pbpaste | /usr/bin/head -c 4097"], { timeout: 2000 })'), "첫 exec = 상수 pbpaste 스크립트(인자 없음 · 로컬)");
   assert.ok(execs[1].includes('await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand, ...longer], { on, timeout: 10000 })'), "둘째 exec = RESOLVE_SCRIPT + cwd + cand + longer(터미널 글자에서 나온 탐침)");
-  assert.ok(code.some(l => l.trim() === "const longer = dcLonger({ clip, sel, text, cand });"), "longer 는 dcLonger 에서만(clip 은 거기까지만)");
+  assert.ok(code.some(l => l.trim() === "const longer = dcLonger({ clip, sel, text: oldText, cand, bd });"), "longer 는 dcLonger 에서만(clip 은 거기까지만)");
   assert.ok(code.some(l => l.includes("const path = dcChoose(e.stdout, cand, longer);")), "결과는 dcChoose 를 거친다");
   assert.ok(!code.some(l => /mergeResolved|found\.length/.test(l)), "mergeResolved · found.length 판정은 dcChoose 로 대체됨");
   for (const l of execs) assert.ok(!/\bclip\b/.test(l), `exec 줄에 clip 금지: ${l.slice(0, 60)}`);
   const uses = code.filter(l => /\bclip\b/.test(l)).map(l => l.trim());
-  assert.ok(uses.every(l => l.startsWith("const clip = ") || l.startsWith("if (typeof clip") || l.includes("dcPick({ clip, sel, cols, text })") || l.includes("dcLonger({ clip, sel, text, cand })")), `clip 사용처가 정해진 넷 밖: ${uses.join(" | ")}`);
-  assert.ok(uses.some(l => l.includes("dcPick({ clip, sel, cols, text })")), "clip 은 dcPick 으로");
+  assert.ok(uses.every(l => l.startsWith("const clip = ") || l.startsWith("if (typeof clip") || l.includes("dcBind({ sel, cols, rows, text: full, clip, total, cut })") || l.includes("dcPick({ clip, sel, cols, text: oldText, bd })") || l.includes("dcLonger({ clip, sel, text: oldText, cand, bd })") || l.includes("if (!dcClipShape({ clip, sel, cols })) return;")), `clip 사용처가 정해진 여섯 밖: ${uses.join(" | ")}`);
+  assert.ok(uses.some(l => l.includes("dcPick({ clip, sel, cols, text: oldText, bd })")), "clip 은 dcPick 으로");
+  // 깊게 읽기 전 클립보드 모양 검사(참/거짓만): 길이 검사 뒤 · total 읽기 앞 · hc read 앞
+  const iShape = body.indexOf("if (!dcClipShape({ clip, sel, cols })) return;"), iLen = body.indexOf("clip.length > 4096"), iTb0 = body.indexOf("const tb = dcTotal(addr);"), iHc = body.indexOf("hcLimited(");
+  assert.ok(iLen > 0 && iShape > iLen && iShape < iTb0 && iShape < iHc, "dcClipShape 는 pbpaste 길이 검사 뒤 · dcTotal · hc read 앞");
+  assert.equal((code.join("\n").match(/dcClipShape\(/g) ?? []).length, 1, "dcClipShape 호출은 한 곳(주석 제외)");
+  // 묶기(dcBind): total 은 읽기 앞 · 뒤가 같을 때만 · how 가 history 가 아니면(stitched · 모르는 값) 묶지 않는다 · 깊이 · 글 상한 · 묶이지 않는 글은 032f193 이 보던 것
+  const iTb = body.indexOf("const tb = dcTotal(addr);"), iRead = body.indexOf("await hcLimited("), iTot = body.indexOf("tb === dcTotal(addr)");
+  assert.ok(iTb > 0 && iRead > iTb && iTot > iRead, "total 은 읽기 앞에서 한 번 · 뒤에서 한 번");
+  assert.ok(body.includes('rd?.how !== "history" ? null : dcBind('), "how 가 history 가 아니면(stitched · 모르는 값) 묶지 않는다");
+  assert.ok(body.includes("dist <= DC_READ_MAX") && body.includes("Math.min(DC_READ_MAX, Math.max(TF_LINES, dist + 2))"), "읽기 깊이");
+  assert.ok(src.includes("DC_READ_MAX = 20000, DC_TEXT_MAX = 4 * 1024 * 1024") && body.includes("full.slice(-DC_TEXT_MAX)") && body.includes("const cut = full.length > DC_TEXT_MAX || (full.length <= DC_BIND_MAX && dcReadCut(full, n));"), "글 상한 + cut");
+  // dcReadCut 은 글이 DC_BIND_MAX 이하일 때만(넘으면 dcBind 가 null) — 한 곳에서만 불리고 import 에 DC_BIND_MAX 가 있다
+  assert.equal(code.filter(l => /\bdcReadCut\(/.test(l)).length, 1, "dcReadCut 호출은 한 곳");
+  assert.ok(code.some(l => /\bdcReadCut\(/.test(l) && l.includes("full.length <= DC_BIND_MAX && dcReadCut(full, n)")), "dcReadCut 은 full.length <= DC_BIND_MAX 일 때만");
+  assert.ok(/import \{[^}]*\bDC_BIND_MAX\b[^}]*\} from "\.\/termfiles\.js"/.test(src), "main.js import 에 DC_BIND_MAX");
+  assert.ok(body.includes("dcOldText(full, n === TF_LINES ? null : TF_LINES + ") && body.includes(", TF_TEXT)"), "묶이지 않는 글: 깊게 안 읽었으면 그대로(032f193) · 깊게 읽었으면 끝 TF_LINES + rows 줄 → TF_TEXT");
+  assert.ok(src.includes("Number.isInteger(p.scroll?.total)") && !src.includes("Number.isFinite(p.scroll?.total)"), "total 은 정수만");
+  assert.ok(body.includes('rd?.how !== "history" ? null : dcBind(') && body.includes("total === null || rd?.how"), "total 을 모르면 묶지 않는다");
+  assert.ok(src.includes("const dcTotal = (addr) =>") && /m\.length === 1 \? m\[0\]\.scroll\.total : null/.test(src), "total = 숫자 scroll.total 항목이 정확히 하나일 때만");
   assert.ok(!SHARED_OR_NOTE.test(code.join("\n")), "setShared · notify · tfNote · this.tf* 금지");
   const aw = lines.map((l, i) => (/\bawait /.test(l) ? i : -1)).filter(i => i >= 0);
-  assert.equal(aw.length, 3, "await 셋(pbpaste · hc read · resolve)");
-  for (const i of aw) assert.ok(/^\s*if \(gen !== this\.dcGen\) return;/.test(lines[i + 1] ?? ""), `await 다음 줄에 dcGen 확인 없음: ${lines[i].trim().slice(0, 60)}`);
+  assert.equal(aw.length, 5, "await 다섯(pbpaste · hc read · 쉼 둘 · resolve)");
+  // 긴 동기 조각 나누기: JSON.parse → (쉼 + gen) → dcBind → (쉼 + gen) → dcOldText/dcPick. 묶기가 도는 때만 쉰다(binds)
+  const iParse = body.indexOf("JSON.parse(r.stdout)"), iBind = body.indexOf("dcBind({"), iOld = body.indexOf("dcOldText("), iPick = body.indexOf("dcPick({");
+  const yieldRe = /if \(binds\) \{ await cx\.sleep\(0\); if \(gen !== this\.dcGen\) return; \}/g;
+  const ys = [...body.matchAll(yieldRe)].map(m => m.index);
+  assert.equal(ys.length, 2, "쉼 + gen 확인 둘");
+  assert.ok(iParse > 0 && ys[0] > iParse && ys[0] < iBind && ys[1] > iBind && ys[1] < iOld && iOld < iPick, "쉼 하나는 JSON.parse 와 dcBind 사이 · 하나는 dcBind 와 dcOldText · dcPick 사이");
+  assert.ok(body.includes("const binds = total !== null && rd?.how === \"history\";"), "binds = dcBind 가 실제로 도는 때만");
+  assert.equal((body.match(/cx\.sleep\(/g) ?? []).length, 2, "cx.sleep 둘뿐");
+  for (const i of aw) assert.ok(/^\s*if \(gen !== this\.dcGen\) return;/.test(lines[i + 1] ?? "") || /await [^;]+; if \(gen !== this\.dcGen\) return;/.test(lines[i]), `await 다음에 dcGen 확인 없음: ${lines[i].trim().slice(0, 60)}`);
   assert.ok(body.includes("if (!this.mac || this.closed) return;"), "macOS 전용");
   assert.equal(code.join("\n").match(/\bterminals\(\)/g)?.length, 1, "terminals() 호출은 하나(ts 를 cols 에도 쓴다)");
   const iSeen = body.indexOf("this.dcSeen = new Map("), iNoTerm = body.indexOf("if (!f?.terminal) return;");

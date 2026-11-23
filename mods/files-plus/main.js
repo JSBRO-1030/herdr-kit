@@ -12,7 +12,7 @@ import { FileMenu, AskDialog } from "./ask-view.js";
 import { opPlan, putTicket, takeTicket, parentRel, joinAbs, menuItems, menuSpec, askSpec, askProps, renameTree, dropTree, withEntry, withoutEntry, renamedEntry, opError } from "./fsops.js";
 import { isRunnable, MAC_HANDLER_SCRIPT, macHandlerVerdict, linuxHandlerVerdict } from "./kinds.js";
 import { JobsWindow, winKey, W as JOBS_W, H_OPEN as JOBS_H_OPEN, H_BAR as JOBS_H_BAR } from "./jobs-view.js";
-import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS, dcStep, dcPick, dcLonger, dcChoose, selSpan, selKey } from "./termfiles.js";
+import { scanText, mergeResolved, mergeLight, endedWorking, unresolved, terminalMachine, RESOLVE_SCRIPT, SEARCH_SCRIPT, scanGate, errClass, stuckAfter, noteWrite, termKey, TF_STUCK_MS, dcStep, dcPick, dcLonger, dcChoose, dcBind, dcOldText, dcClipShape, dcReadCut, DC_BIND_MAX, selSpan, selKey } from "./termfiles.js";
 import { KEY, SOURCES, restoreOwner, orphanedJobs, snapshot, summary, speedometer, drain, pushHistoryGroup, throttle, safeName, ownerKeys, readShared, startLife, lifeCurrent, seenJids, previewKey, orphanParts, isPartPath, livePreviewId, partsKey, closingParts, pendingParts, OWNERS_KEY, OWNER_BEAT_MS, registerOwner, dropOwners, deadOwners, normalizeOwners, ownerCleanupPlan } from "./state.js";
 
 const NAME = "files-plus";
@@ -54,6 +54,10 @@ function termTarget(prev) {
 const TF_READ_MS = 5000, TF_LINES = 300, TF_TEXT = 64 * 1024, TF_DEBOUNCE = 800, TF_ROWS = 8, TF_MAX = 12, TF_POLL_MS = 10000;
 // 더블클릭 열기: 선택 시각부터 이 시간이 지나면 열지 않는다(느린 원격에서 늦게 뜬 미리보기가 키보드를 가져가지 않게)
 const DC_OPEN_MAX_MS = 4000;
+// 더블클릭 묶기(dcBind): 선택 행이 맨 아래에서 이만큼(행) 안이면 그 행까지 깊게 읽는다 · 깊게 읽은 글 전체 상한(UTF-16) — 넘으면 앞을 자르고 cut 이지만 글이 DC_BIND_MAX(512 KiB)를 넘어 묶이지 않는다(옛 길). 아래 붙임에 닿는 잘림은 dcReadCut(줄 수 제한)뿐.
+const DC_READ_MAX = 20000, DC_TEXT_MAX = 4 * 1024 * 1024;
+// 이 주소 터미널의 전체 행 수(panes() scroll.total): 정수 total 을 가진 항목이 정확히 하나일 때만 · 아니면 null(레이아웃 블록 터미널 · 대체 화면 · 겹침).
+const dcTotal = (addr) => { const m = panes().filter(p => p.terminal === addr && Number.isInteger(p.scroll?.total)); return m.length === 1 ? m[0].scroll.total : null; };
 
 // [주의] hc 에는 timeout 옵션이 없다 → ms 안에 안 돌아오면 null(늦은 결과는 무시) — 안 그러면 tfBusy 가 안 풀려 줄이 멎는다. 실패도 null.
 function hcLimited(cx, args, ms = TF_READ_MS) {
@@ -366,6 +370,7 @@ export default class FilesPlus extends View {
   // 터미널에서 낱말을 더블클릭(= 마우스 선택) → 그 낱말이 터미널에 나온 파일 이름이면 미리보기. macOS 전용(클립보드 = pbpaste).
   // 평소 틱은 입출력이 없다(terminals · focused · panes 만 · spaces 는 fire 때) — 선택이 400 ms 머물러 «새 선택» 이 될 때만 작업을 하나 띄운다.
   // 클립보드 글은 터미널 글자에서 찾은 후보 중 하나를 «고르는 데만» 쓴다(dcPick). 클립보드에서만 온 글은 exec 로 가지 않는다 — exec 에는 상수 스크립트 · 터미널 쪽 후보(cand) · dcLonger 가 터미널 글자에서 자른 «더 긴 이름» 탐침만 간다.
+  // 선택 칸을 글 위치로 묶는다(dcBind · 팬 터미널만 · 안 묶이면 옛 규칙 그대로).
   dcTick(cx) {
     if (!this.mac || this.closed) return;
     const ts = terminals();
@@ -380,6 +385,7 @@ export default class FilesPlus extends View {
     if (f.shown && f.shown !== f.terminal) return;              // 선택은 보이는 쪽(terminal.show) 터미널 것 — 그 cwd 는 검증 못 한다 → 열지 않는다 · 상태는 그대로
     const addr = f.terminal, sel = f.selection ?? null, now = Date.now();
     const cols = ts.find(t => t.address === addr)?.cols;
+    const rows = ts.find(t => t.address === addr)?.rows;
     const r = dcStep(this.dcSt, { addr, sel, cols, now, prevKey: prevSeen?.get(addr) });
     this.dcSt = r.state;
     if (!r.fire) return;
@@ -391,21 +397,38 @@ export default class FilesPlus extends View {
     const gen = ++this.dcGen;                                   // 새 선택이 앞 작업을 밀어낸다 — 앞 작업은 이 순간부터 낡은 것
     cx.spawn(async cx => {
       try {
-        // [경고] 클립보드(믿을 수 없는 입력 · 비밀번호일 수 있음)는 저장 · 기록 · 진단 · exec 인자로 쓰지 않는다. dcPick 이 터미널 글자의 후보 중 하나를 고르는 데만 쓴다(dcLonger 는 clip 으로 꼬리를 확인할 뿐 탐침은 터미널 글자 + cand 로만 만든다).
+        // [경고] 클립보드(믿을 수 없는 입력 · 비밀번호일 수 있음)는 저장 · 기록 · 진단 · exec 인자로 쓰지 않는다. dcClipShape(모양 참/거짓만) · dcBind(선택 ↔ 글 위치 자체 검사) · dcPick 이 터미널 글자의 후보 중 하나를 고르는 데만 쓴다(dcLonger 는 clip 으로 꼬리를 확인할 뿐 탐침은 터미널 글자 + cand 로만 만든다).
         const c = await exec("/bin/sh", ["-c", "LC_ALL=en_US.UTF-8 /usr/bin/pbpaste | /usr/bin/head -c 4097"], { timeout: 2000 });
         if (gen !== this.dcGen) return;
         const clip = c?.code === 0 ? c.stdout : null;
         if (typeof clip !== "string" || clip.length > 4096) return;
-        const r = await hcLimited(cx, ["read", addr, "--lines", String(TF_LINES), "--json"]);
+        if (!dcClipShape({ clip, sel, cols })) return;   // 깊게 읽기 전 싼 검사 — 클립보드 모양이 안 맞으면 읽지 않는다(참/거짓만)
+        // 묶기(dcBind): 선택 행까지 깊게 읽는다(맨 아래서 DC_READ_MAX 행 안이면). total 은 읽기 앞 · 뒤가 같을 때만 쓴다(읽는 사이 줄이 밀렸으면 모름).
+        const tb = dcTotal(addr);
+        let n = TF_LINES;
+        if (tb !== null) { const dist = tb - Math.min(sel.start.row, sel.end.row); if (dist <= DC_READ_MAX) n = Math.min(DC_READ_MAX, Math.max(TF_LINES, dist + 2)); }
+        const r = await hcLimited(cx, ["read", addr, "--lines", String(n), "--json"]);
         if (gen !== this.dcGen) return;
         if (!r || r.code !== 0) return;
-        let text = JSON.parse(r.stdout)?.text;
-        if (typeof text !== "string") return;
-        if (text.length > TF_TEXT) text = text.slice(-TF_TEXT);
-        const cand = dcPick({ clip, sel, cols, text });
+        const rd = JSON.parse(r.stdout);
+        let full = rd?.text;
+        if (typeof full !== "string") return;
+        // [주의] 글자(UTF-16) 수로 자른다(앞을 버림 → cut). 4 MiB 를 넘는 읽기는 자른 뒤에도 dcBind 의 DC_BIND_MAX 를 넘어 묶이지 않는다(옛 길). 터미널 글자는 믿을 수 없는 입력(이름은 위치 인자로만 sh 에 넘긴다).
+        const cut = full.length > DC_TEXT_MAX || (full.length <= DC_BIND_MAX && dcReadCut(full, n));   // 줄 수 제한(--lines n)에 걸린 읽기도 앞이 잘렸을 수 있다 → 아래 붙임만(반드시 slice 앞의 원래 글로 센다). DC_BIND_MAX 를 넘는 글은 dcBind 가 어차피 null 이라 줄 수를 세지 않는다
+        if (cut) full = full.slice(-DC_TEXT_MAX);
+        const total = tb !== null && tb === dcTotal(addr) ? tb : null;
+        // 읽기 방식(how)이 "history" 일 때만 묶는다 — stitched(화면과 기록을 이어 붙인 읽기) · 모르는 값은 줄 ↔ 행 대응을 믿지 않는다 → 묶지 않는다.
+        // [주의] Herdr 는 한 번에 약 0.5 초 넘게 도는 JS 조각을 소리 없이 끊는다(VM 실측 450–600 ms · 모드는 산다) → 읽기·파싱 / 묶기 / 옛 길을 다른 조각으로 나눈다(묶기가 도는 때만 쉰다) · 쉬는 사이 새 선택이 서면 버린다(gen). 앞에서 잡은 sel · cols · rows · addr · cwd · full 은 값이라 낡지 않는다.
+        const binds = total !== null && rd?.how === "history";
+        if (binds) { await cx.sleep(0); if (gen !== this.dcGen) return; }
+        const bd = total === null || rd?.how !== "history" ? null : dcBind({ sel, cols, rows, text: full, clip, total, cut });
+        if (binds) { await cx.sleep(0); if (gen !== this.dcGen) return; }
+        // 묶이지 않는 길의 글: 깊게 안 읽었으면(n === TF_LINES) 읽은 그대로 끝 TF_TEXT 글자(032f193 과 같다) · 깊게 읽었으면 «마지막 TF_LINES + rows 줄» → 끝 TF_TEXT 글자. 끝 빈 행이 잘려 화면 줄이 적으면(예: Ctrl+L 뒤) 032f193 보다 최대 rows 줄 더 오래된 줄까지 본다(바뀐 동작 · 연 것은 선택한 이름).
+        const oldText = dcOldText(full, n === TF_LINES ? null : TF_LINES + (Number.isInteger(rows) && rows > 0 ? rows : 0), TF_TEXT);
+        const cand = dcPick({ clip, sel, cols, text: oldText, bd });
         if (cand === null) return;
-        // «더 긴 이름»(cand + 붙은 꼬리 · 줄바꿈 뒤 이어진 조각)도 같은 exec 로 확인한다 — 있으면 dcChoose 가 아무것도 열지 않는다. 탐침은 터미널 글자 + cand 로만 만든다(clip 은 안 간다).
-        const longer = dcLonger({ clip, sel, text, cand });
+        // «더 긴 이름»(cand + 붙은 꼬리 · 줄바꿈 뒤 이어진 조각 · 폴더 접두)도 같은 exec 로 확인한다 — 있으면 dcChoose 가 아무것도 열지 않는다. 탐침은 터미널 글자 + cand 로만 만든다(clip 은 안 간다).
+        const longer = dcLonger({ clip, sel, text: oldText, cand, bd });
         const e = await exec("sh", ["-c", RESOLVE_SCRIPT, NAME, cwd, cand, ...longer], { on, timeout: 10000 });
         if (gen !== this.dcGen) return;
         if (e.code !== 0) return;

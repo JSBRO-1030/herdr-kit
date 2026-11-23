@@ -219,11 +219,11 @@ export function candidates(text, opts) {
 
 // 두 단계 — 둘 다 `sh -c SCRIPT files-plus <cwd> <후보>…` · POSIX sh(dash 가능) · BSD/GNU find 둘 다 · 출력 = NUL 로 끝나는 레코드들.
 //  1) RESOLVE_SCRIPT(빠름): 후보마다 `/` 시작 → 그대로 · `~/` → $HOME/… · 그 밖 → cwd/… . 읽을 수 있는 «일반 파일» 이면 폴더를 cd -P 로 실제 경로로 바꿔 절대 경로를 낸다.
-//     못 찾은 «상대» 후보는 `?후보` 레코드로 돌려준다(unresolved) — 절대 · `~/` 는 찾지 않는다.
+//     맨 앞에 `=<cwd 실제 경로>` 레코드 하나(dcChoose 가 상대 후보의 기대 경로를 만든다 · parseResolved · unresolved 는 무시). 못 찾은 «상대» 후보는 `?후보` 레코드로 돌려준다(unresolved) — 절대 · `~/` 는 찾지 않는다.
 //  2) SEARCH_SCRIPT(느릴 수 있음): 1) 이 못 찾은 이름만 find 한 번으로 — cwd 아래 깊이 3(경로 후보는 그 조각 수 + 2, 최대 6) · -xdev · .git/node_modules 는 들어가지 않는다.
 //     `/` 없는 이름 = 이름이 같은 파일 · `/` 든 상대 경로 = 경로 끝이 같은 파일(`*/src/a.json`). 이름 하나당 3개 · 전체 24개까지.
 //     cwd 가 `/` 이거나 실제 $HOME 이거나 $HOME 의 조상이면 아예 찾지 않는다. 이름은 10개까지.
-// 개행·제어문자가 든 경로는 내지 않는다 · cwd 가 폴더가 아니면 exit 3. parseResolved 는 `/` 로 시작하는 레코드만 쓴다(`?` 레코드 무시).
+// 개행·제어문자가 든 경로는 내지 않는다(예외: `=<root>` 기록 — dcChoose 의 CTRL 검사가 거른다) · cwd 가 폴더가 아니면 exit 3. parseResolved 는 `/` 로 시작하는 레코드만 쓴다(`?` 레코드 무시).
 // [주의] 호출 쪽이 둘 다 exec timeout(10 s)을 건다. 2) 가 실패해도 1) 의 결과는 쓴다 — 두 번 나눠 부르는 이유.
 const EMIT = `emit() {
   d=\${1%/*}; n=\${1##*/}
@@ -239,6 +239,7 @@ const EMIT = `emit() {
 export const RESOLVE_SCRIPT = `[ $# -ge 1 ] || exit 2
 cd -P -- "$1" 2>/dev/null || exit 3
 root=$(pwd -P) || exit 3
+printf '=%s\\0' "$root"
 shift
 ${EMIT}
 for c in "$@"; do
@@ -406,7 +407,7 @@ export function noteWrite(prev, next, now, lastAt, minGap = 15000) {
 // 화면 칸 수: 동아시아 와이드(한글 · CJK · 전각 …) 2 · 결합 문자 · 폭 없는 글 0 · 나머지 1.
 const WIDE = [[0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd]];
 const ZERO = [[0x0300, 0x036f], [0x200b, 0x200f], [0xfe00, 0xfe0f], [0x1ab0, 0x1aff], [0x20d0, 0x20ff], [0x1160, 0x11ff], [0xd7b0, 0xd7ff], [0x3099, 0x309a], [0x302a, 0x302f]];   // 일본어 탁점 결합(NFD) · 한자 성조 표시 포함
-const inRanges = (cp, rs) => { for (const [a, b] of rs) if (cp >= a && cp <= b) return true; return false; };
+const inRanges = (cp, rs) => { for (let k = 0; k < rs.length; k++) if (cp >= rs[k][0] && cp <= rs[k][1]) return true; return false; };   // 색인 루프(해석기에서 구조 분해보다 몇 배 빠르다)
 export function cellWidth(s) {
   let w = 0;
   for (const ch of String(s ?? "")) {
@@ -467,6 +468,237 @@ export function dcStep(state, { addr, sel, cols, now, prevKey }, { settleMs = 40
   return { state, fire: false };
 }
 
+// ── 선택 ↔ 터미널 글자 묶기(dcBind) ──
+// 선택 칸(행 · 열)을 hc read 글의 «한 줄 안 글자 범위» 로 바꾼다. 묶이면 dcPick · dcLonger 가 «그 자리의 앞뒤 글» 로만 판단한다(전체 글 훑기 · 낡은 쌍 오탐 없음).
+// 행 = 가장 오래된 기록부터 지금 화면까지 센 줄(소프트 랩 포함). hc read 의 줄은 «논리 줄» 이라 한 줄이 여러 행을 차지한다 — 칸 걸음(cell walk)으로 센다.
+// [경고] 클립보드(clip)는 «자체 검사» 에만 쓴다 — 돌려주는 값은 글(text)에서 나온 줄 · 숫자뿐이다.
+// [주의] 같은 열의 같은 낱말이 한 화면 안 다른 행에 또 있으면 닻이 어긋났을 때 잘못 묶일 수 있다 → 모호함 가드(dcBind)가 그런 경우를 묶지 않는다.
+const posInt = (n) => Number.isInteger(n) && n > 0;
+
+// 행 계산 전용 폭 범위 [lo, hi] — Herdr 0.1.16 VM 실측(유니코드 표준 폭: 동아시아 넓음 · 그림 글자 기본 표시 = 2 · 결합 글자 = 0 · 이형 선택자 VS16 = 앞 글자를 2 칸으로 넓힘). cellWidth · WIDE · ZERO 는 건드리지 않는다(칸 수 검사가 쓴다).
+// 확실한 것은 lo = hi · 불확실하면 lo ≠ hi. 한 번도 안 본 글자는 [0, 2].
+const W11 = [1, 1], W22 = [2, 2], W00 = [0, 0], W01 = [0, 1], W12 = [1, 2], W02 = [0, 2];
+const RNG_ONE = new Set([0x23FA, 0x23BF, 0x273B, 0x25CF, 0x2014, 0x2026, 0x2713, 0x2714, 0x2717, 0x26A0, 0x2605, 0x25B6, 0x276F, 0x2139]);   // 실측 1 칸 낱개
+const RNG_TWO = new Set([0x2705, 0x274C, 0x26A1, 0x2728, 0x2B50, 0x1F680, 0x1F525, 0x1F4C1, 0x1F7E2, 0x1FA84]);                           // 실측 2 칸 낱개
+const RNG_ONE_BLOCKS = [[0x0370, 0x03ff], [0x0400, 0x0482], [0x048a, 0x052f], [0x1e00, 0x1eff], [0x2010, 0x2027], [0x2030, 0x205e], [0x2190, 0x21ff], [0x2500, 0x259f], [0x2800, 0x28ff]];   // 표준 폭 1 · 그림 글자 기본 표시 없음
+const RNG_PICT = [[0x1f300, 0x1f64f], [0x1f900, 0x1f9ff]];   // WIDE 중 그림 글자 두 범위 — 2 칸 아닌 것이 섞여 있다
+// 표(WIDE · ZERO)가 «확실» 이라 했지만 Herdr 가 다르게 그리는 글자 — 불확실 [0, 2] 로 내린다(하한 0 → 행 수 하한이 참으로 남고 · 칸 걸음은 DC_UNSURE → null → 옛 길).
+// 출처: 낱개(U+3248–324F · FF00 · 3097 · A48D · 3130 · 318F · 321F · FE53 · 2E9A · 31E6 · A97D 는 1 칸 · U+3164 · 115F 는 0 칸)는 Herdr 0.1.16 VM 실측 ·
+//   나머지 범위(배정 안 된 글자 · 채움 글자 · 폭 0 인 글자)는 유니코드 17 전 글자를 터미널 폭 규칙(Ghostty 쪽 wcwidth)에 대 훑은 것 중 표와 어긋난 것 전부. U+302E–302F 는 한글 성조 표시(Mc · 칸 차지 글자)인데 모델은 0 칸으로 본다 → 불확실.
+// [주의] 표와 «맞는» 글자(U+FA6E · 2A6E0 · 배정 안 된 것 · U+31E3–31E5 · 31EF · 2FFC · 2FFF 는 배정된 So 글자 · 실측 2 칸)는 여기 넣지 않는다.
+const WIDE_UNSURE = [[0x115f, 0x115f], [0x2e9a, 0x2e9a], [0x2ef4, 0x2eff], [0x2fd6, 0x2fef], [0x3097, 0x3098], [0x3100, 0x3104], [0x3130, 0x3130], [0x3164, 0x3164], [0x318f, 0x318f], [0x31e6, 0x31ee], [0x321f, 0x321f], [0x3248, 0x324f], [0xa48d, 0xa48f], [0xa4c7, 0xa4cf], [0xa97d, 0xa97f], [0xfe53, 0xfe53], [0xfe67, 0xfe67], [0xfe6c, 0xfe6f], [0xff00, 0xff00], [0x2fffe, 0x2ffff]];
+const ZERO_UNSURE = [[0x1ade, 0x1adf], [0x1aec, 0x1aff], [0x20f1, 0x20ff], [0x302e, 0x302f], [0xd7c7, 0xd7ca], [0xd7fc, 0xd7ff]];
+// 뜨거운 길: 목록 훑기(20 개) 대신 로드 때 범위를 펼친 Set 조회(상수 시간) — 범위 배열이 원본이고 Set 은 거기서만 만든다(어긋날 수 없다).
+const rangeSet = (rs) => { const s = new Set(); for (const [lo, hi] of rs) for (let c = lo; c <= hi; c++) s.add(c); return s; };
+const WIDE_UNSURE_SET = rangeSet(WIDE_UNSURE), ZERO_UNSURE_SET = rangeSet(ZERO_UNSURE);
+const cpRange = (cp) => {
+  if (cp < 0x300) return W11;   // 제어 문자(U+0000–001F · 007F–009F)는 터미널이 실행하고 칸에 저장하지 않아 `hc read` 글에 나오지 않는다 — 빠른 길이 기대므로 그대로 둔다
+  if (RNG_ONE.has(cp)) return W11;
+  if (RNG_TWO.has(cp)) return W22;
+  if (cp >= 0xfe00 && cp <= 0xfe0f) return W01;
+  if (inRanges(cp, ZERO)) return ZERO_UNSURE_SET.has(cp) ? W02 : W00;
+  if (inRanges(cp, RNG_PICT)) return W12;
+  if (inRanges(cp, WIDE)) return WIDE_UNSURE_SET.has(cp) ? W02 : W22;
+  if (inRanges(cp, RNG_ONE_BLOCKS)) return W11;
+  return W02;
+};
+// 묶음 위험 줄: Herdr 는 폭을 글자 묶음(grapheme cluster) 단위로 잰다 → 표 합과 어긋나는 열이 든 줄(실측 0.1.16: 🚀 ZWJ 🔥 = 2 칸(표 4) · ✅ VS15 = 1(표 2) · 첫소리 겹침 ᄀᄀ = 1(표 4) · 피부색 ✋🏻 = 2 · 🇰🇷 = 2).
+//  ZWJ(U+200D) · VS15(U+FE0E) · 3 칸 줄표 U+2E3B(⸻ · 폭 모델 3 칸 · 표 [0, 2] 라 행 수가 모자랄 수 있다 · 실측 아님 → 예방으로 위험) · 피부색 수식(U+1F3FB–1F3FF) · 중성 자모(1160–11A7 · D7B0–D7C6)가 «바로 뒤에 없는» 첫소리 자모(1100–115F · A960–A97F: 홀로 · 첫소리 겹침 · 완성형 음절 앞 · 끝소리 앞 · 줄 끝) · 앞이 한글이 아니거나 줄 머리인 중성/끝소리 자모(1160–11FF · D7B0–D7FF).
+//  홀로 첫소리는 실측(0.1.16) ASCII x 앞 · 공백 앞 · 한자 앞 · 줄 끝(다음 행으로 넘어감)에서 모두 2 칸 = 표(W22)와 같다. 그래도 첫소리 겹침이 1 칸으로 좁아지는 걸 보면 첫소리 처리가 폭 표와 다르고 끝소리 앞 등은 안 재서 — 닫는 쪽(fail-closed)으로 위험 줄 = 옛 길.
+//  표준 NFD 한글(첫소리 + 중성 [+ 끝소리] · macOS 파일 이름)은 위험이 아니다. 정규식은 ASCII · \uXXXX 만(QuickJS: `u` 플래그 없음).
+const DC_HAZARD = /\u200D|\uFE0E|\u2E3B|\uD83C[\uDFFB-\uDFFF]|[\u1100-\u115F\uA960-\uA97F](?![\u1160-\u11A7\uD7B0-\uD7C6])|(?:^|[^\u1100-\u11FF\uA960-\uA97F\uD7B0-\uD7FF\uAC00-\uD7A3])[\u1160-\u11FF\uD7B0-\uD7FF]/;
+const dcHazard = (line) => DC_HAZARD.test(line);
+// 한 줄이 차지하는 행 수: 다음 글자가 그 행의 남은 칸에 안 들어가면 새 행(너비 2 글자는 마지막 칸이면 일찍 넘어간다) · 빈 줄 = 1 행 · 폭 0 글자는 칸을 안 쓴다.
+// 폭 lo 걸음과 hi 걸음 두 행 수를 한 번에 센다(걸음은 폭에 단조 → 진짜 행 수는 둘 사이). 같으면 그 값 · 다르면 «불확실» = 음수(−lo 행 수).
+// VS16(U+FE0F)은 hi 걸음에서 앞 글자를 1 칸 넓히고(마지막 칸이면 그 글자째 다음 행) · lo 걸음에서는 칸을 안 쓴다.
+// bud = { left } 걸음 예산(UTF-16 단위) — 빠른 길(위 둘)이 아닌 줄은 cpRange 루프 «전에» 그 줄 길이 전체를 예산에서 빼고, 모자라면 0 을 돌려준다(줄 수는 ≥ 1 이라 0 은 겹치지 않는다).
+// 0 = 예산 초과 또는 묶음 위험 줄(빠른 길 아님) — 위험 줄의 진짜 행 수는 하한보다 «적을 수» 있어 하한으로 쓸 수 없다. 묶음 위험은 줄마다 한 번만 돈다.
+function dcRowsOf(line, cols, bud) {
+  if (2 * line.length <= cols) return 1;   // UTF-16 단위 하나는 많아야 2 칸 → 넘칠 수 없다(빈 줄도 1)
+  const n = line.length;
+  let k = 0;
+  while (k < n && line.charCodeAt(k) < 0x300) k++;
+  if (k === n) return Math.ceil(n / cols);   // 전부 폭 1 → 글자 수 = 칸 수
+  if ((bud.left -= n) < 0) return 0;         // 느린 걸음 예산 초과
+  let lr = 1, lc = 0, hr = 1, hc = 0, hp = 0;
+  for (k = 0; k < n;) {
+    const cp = line.codePointAt(k);
+    k += cp > 0xffff ? 2 : 1;
+    const r = cpRange(cp), a = r[0], b = r[1];
+    if (a > 0) { if (lc > 0 && lc + a > cols) { lr++; lc = 0; } lc += a; }
+    if (cp === 0xfe0f) {
+      if (hp > 0) { if (hc + 1 > cols) { hr++; hc = hp + 1; } else hc++; hp = 0; }
+    } else if (b > 0) {
+      if (hc > 0 && hc + b > cols) { hr++; hc = 0; }
+      hc += b; hp = b;
+    }
+  }
+  if (dcHazard(line)) return 0;   // 묶음 위험 줄: 행 수가 하한보다 적을 수 있다 → 호출 쪽이 null(위 빠른 길은 넘칠 수 없어 예외)
+  return lr === hr ? lr : -lr;    // 확실 = 그 값 · 불확실 = 음수(−lo 행 수)
+}
+// 칸 걸음용 글자 폭: 확실(cpRange 가 lo = hi)하면 그 폭 · 아니면 -1. 예외 하나 — U+FE0F 바로 앞 글자의 범위가 [2,2] 면 그 FE0F 는 0(앞 칸에 붙음 · 실측 U+2705 + FE0F = 2 칸). prev = 줄 안 바로 앞 글자(없으면 -1).
+// 1 칸 글자 + FE0F 는 FE0F 가 불확실이라 -1 이다(옛 추정 «2 칸» 은 쓰지 않는다).
+function dcW(cp, prev) {
+  if (cp === 0xfe0f && prev >= 0) { const p = cpRange(prev); if (p[0] === 2 && p[1] === 2) return 0; }
+  const r = cpRange(cp);
+  return r[0] === r[1] ? r[0] : -1;
+}
+const DC_UNSURE = Object.freeze({ unsure: true });   // dcCells · dcPos 가 «칸 폭 불확실로 못 가림» 을 알리는 값(null = 그 자리에 없음과 구별)
+// 줄 안 (행 sr, 열 sc) 에서 «시작하는» 글자 ~ (행 er, 열 ec) 칸을 덮는 글자(+ 뒤따르는 폭 0 글자) 끝까지의 UTF-16 범위. 그런 글자가 없으면 null · 폭이 불확실하면 DC_UNSURE.
+// 지나는 글자(시작 칸 · 끝 칸 글자까지 포함)는 모두 폭이 확실해야 한다(dcW). 끝 칸 글자 뒤: 폭 0 확실은 범위에 붙이고 계속 · 폭 하한 > 0 이면 거기서 끝 · 하한 0 < 상한이면 DC_UNSURE.
+// [주의] 불확실이면 묶지 않는다(dcBind 가 null) — 불확실 글자를 추정 폭으로 걷지 않는다.
+function dcCells(line, cols, sr, sc, er, ec) {
+  let row = 0, col = 0, a = -1, b = -1, prev = -1;
+  for (let k = 0; k < line.length;) {
+    const cp = line.codePointAt(k), len = cp > 0xffff ? 2 : 1, w = dcW(cp, prev);
+    prev = cp;
+    if (b >= 0) {
+      if (w === 0) { b = k + len; k += len; continue; }   // 폭 0 확실 글자는 끝 칸 글자에 붙는다
+      if (w > 0 || (w < 0 && cpRange(cp)[0] > 0)) break;   // 폭 하한 > 0 → 새 칸에서 시작 = 범위 끝
+      return DC_UNSURE;                                    // 하한 0 < 상한: 앞 칸에 붙는지 모른다
+    }
+    if (w < 0) return DC_UNSURE;
+    if (w === 0) { k += len; continue; }
+    if (col > 0 && col + w > cols) { row++; col = 0; }
+    if (a < 0) {
+      if (row === sr && col === sc) a = k;
+      else if (row > sr || (row === sr && col > sc)) return null;   // 시작 칸에서 시작하는 글자가 없음(글자 가운데 · 빈 칸)
+    }
+    if (a >= 0) {
+      if (row === er && col <= ec && ec < col + w) b = k + len;
+      else if (row > er || (row === er && col > ec)) return null;   // 끝 칸을 덮는 글자가 없음
+    }
+    col += w; k += len;
+  }
+  return a >= 0 && b >= 0 ? { a, b } : null;
+}
+// 줄 안 UTF-16 위치 ks(오름차순)에서 시작하는 글자의 (행, 열)을 한 번의 걸음으로 구한다(가드용). 그 글자까지(포함) 폭이 모두 확실해야 한다 · 아니면 DC_UNSURE(글자 가운데 위치도 같다).
+function dcPos(line, cols, ks) {
+  const out = [];
+  let row = 0, col = 0, prev = -1, j = 0;
+  for (let k = 0; k < line.length && j < ks.length;) {
+    if (ks[j] < k) return DC_UNSURE;
+    const cp = line.codePointAt(k), len = cp > 0xffff ? 2 : 1, w = dcW(cp, prev);
+    prev = cp;
+    if (w < 0) return DC_UNSURE;
+    if (w > 0 && col > 0 && col + w > cols) { row++; col = 0; }
+    if (ks[j] === k) { out.push([row, col]); j++; }
+    col += w; k += len;
+  }
+  return j === ks.length ? out : DC_UNSURE;
+}
+// 줄 수 제한(--lines n)에 걸린 읽기인가: text 의 논리 줄 수(끝 개행의 빈 조각은 줄이 아님)가 n 이상이면 앞이 잘렸을 수 있다 → true(아래 붙임만). n 이 양의 정수가 아니거나 text 가 글이 아니면 true(보수).
+// split 없이 줄 끝(`\r\n` · `\n` · `\r`)을 세다가 n 에 닿으면 바로 true.
+export function dcReadCut(text, n) {
+  if (typeof text !== "string" || !posInt(n)) return true;
+  let br = 0, k = 0;
+  const len = text.length;
+  while (k < len) {
+    const c = text.charCodeAt(k++);
+    if (c === 13 && text.charCodeAt(k) === 10) k++;
+    if (c === 10 || c === 13) { if (++br >= n) return true; }
+  }
+  const endsBr = len > 0 && (text.charCodeAt(len - 1) === 10 || text.charCodeAt(len - 1) === 13);
+  return (br > 0 && endsBr ? br : br + 1) >= n;
+}
+export const DC_WIN_MAX = 64 * 1024;   // = main.js TF_TEXT(옛 길이 보는 글 상한)
+export const DC_BIND_MAX = 512 * 1024;   // 묶기가 걸음을 도는 글 상한(UTF-16) — 넘으면 묶지 않는다(행 계산 전체 걸음이 이 안에서만 돈다)
+export const DC_WALK_MAX = 64 * 1024;    // dcBind 한 번에 «느린 걸음»(행 수 cpRange 루프 · 묶인 줄 칸 걸음 · 가드 찾기 · 가드 걸음)이 지나는 UTF-16 단위 합의 상한 — 넘으면 null(옛 길)
+export const DC_FIND_DIV = 1024;         // 가드 `indexOf` 한 줄 비용 = 줄 길이 × 낱말 길이 글자 비교(QuickJS 순진한 탐색) → 예산 1 단위 = 비교 DC_FIND_DIV 번. 필요한 성질: «비교 1024 번 ≤ cpRange 걸음 1 번» → 찾기가 걸음 예산이 허용하는 시간보다 오래 걸릴 수 없다. 실측(Herdr 0.1.16 QuickJS): 상한 근처 찾기 입력(낱말 1002 자 · 62000 자 줄 · cols 334) dcBind 91 ms · 걸음 상한 입력 204–271 ms. [주의] `node --jitless` 는 찾기 비용을 못 본다(V8 indexOf 는 빠름) — 찾기 값은 `indexOf` 를 감싼 합 시험으로 확인한다
+// { sel, cols, rows, text, clip, total, cut } → { lines, i, a, b } | null. lines = text.split(/\r\n|\n|\r/) · lines[i].slice(a, b) 가 선택한 글 그대로(dcWord(clip, sel) 와 같아야 한다).
+//  · total = 그 터미널의 전체 행 수(panes() scroll.total · 양의 정수) · cut = text 앞을 잘랐음(줄 수 제한에 걸린 읽기 포함 — dcReadCut). total 을 모르면(양의 정수가 아님) 묶지 않는다(null).
+//  · 닻 하나: d = total − R(글의 행 수). d < 0 이면 null(total 과 글이 어긋남 · cut 이든 아니든). 안 잘렸으면(!cut) d > rows 도 null(끝 빈 행이 화면보다 많은 경우 포함) · 0 ≤ d ≤ rows 면 위 붙임(오프셋 0 · 첫 줄 = 0 행). 잘렸으면 아래 붙임(오프셋 d · 마지막 줄이 total − 1 행에서 끝남).
+//    이 닻으로 선택을 줄 안 글자 범위로 바꾸고 클립보드와 글자가 같아야 한다(자체 검사).
+//  · 행 수 불확실 줄(dcRowsOf < 0): 안 잘린 읽기는 묶인 줄의 위치가 «위» 줄들의 행 수에 기대므로 글 안 어느 줄이든 있으면 null. 잘린 읽기는 j0(행 o.s.row − d 를 [0, R−1] 로 자른 행이 든 줄)부터 끝 줄까지 있으면 null —
+//    j0 위 줄의 오차는 st(앞 줄 합)와 R(전체 합)이 같이 나눠 가져 st + d 에서 상쇄된다(진짜 행 수 ≥ 하한이라 진짜 d ≤ 계산 d → 가드 범위 [0, d] 가 진짜 오프셋을 덮는다). [주의] 이 상쇄는 아래 붙임에서만 성립한다(위 붙임은 st 만 쓴다).
+//  · 묶음 위험 줄(빠른 길이 아닌 것 · dcRowsOf = 0)은 «하한» 이 아니다 — 진짜 행 수가 표 하한보다 적을 수 있어(실측 🚀 ZWJ 🔥 = 2 칸 · 표 4) 위 근거가 깨진다 → 잘린 읽기에서도 글 안 어디에 있든 null(짧은 줄 = 1 행 빠른 길은 예외).
+//  · 칸 불확실: 시작 칸 · 끝 칸 글자까지 지나는 글자 중 폭이 불확실한 것(dcW)이 있으면 null.
+//  · 모호함 가드(같은 열 다른 등장): 가능한 오프셋 = [0, d](글 첫 줄은 0 행보다 앞일 수 없고 글 끝은 total 을 넘을 수 없다 — 끝 빈 행 수와 무관). 그 오프셋을 낼 수 있는 등장은 첫 글자의 글 기준 행이 [o.s.row − d, o.s.row] 안인 것뿐 → 그 행과 겹치는 줄만 본다(잘린 읽기는 묶인 줄부터 아래 · 안 잘린 읽기는 d 행 이내 위 · 범위 밖 줄은 걷지도 세지도 않는다).
+//    그 줄들에서 클립보드 글(w)의 다른 등장(겹침 포함 · 닻이 묶은 등장 하나만 뺀다)의 (행, 열)을 줄마다 한 번의 걸음(dcPos)으로 구해, 열이 선택 시작 열과 같고 암시 오프셋 o.s.row − (st[L] + r)이 [0, d] 안이면 null · 걸음 중 폭 불확실도 null.
+//  · 상한(넘으면 null): 걸음 예산 DC_WALK_MAX — 한 번의 더블클릭이 지나는 느린 걸음 합(UTF-16): ① 행 수 걸음(빠른 길 아닌 줄의 길이 전체 · 걷기 전에 뺀다) ② 묶인 줄 칸 걸음(줄 길이) ③ 가드 찾기(범위 안 «모든» 줄 · ceil(줄 길이 × 낱말 길이 ÷ DC_FIND_DIV) · `indexOf` 앞에 뺌 · 빈 줄 0) ④ 가드 등장 줄(등장이 있는 줄은 줄 길이 «전체» · 위험 줄 검사(정규식이 줄 전체를 훑음)와 dcPos 걸음 «앞» 에 뺌) ≤ DC_WALK_MAX — 넘으면 옛 길(긴 비ASCII 기록 · 64K 넘는 비ASCII 한 줄).
+//    ③ 은 찾기만 덮고(등장 없는 줄은 걷지도 훑지도 않는다 → 긴 줄 위 이름도 닿는다) 등장이 있는 줄의 훑기·걸음은 ④ 가 센다. 가드 범위 안 등장 수 ≤ 256 · DC_WIN_MAX 보다 긴 줄에 등장이 있으면 null. 한 줄은 닻에서 한 번 + 가드에서 많아야 한 번 걷는다(비용은 rows 와 무관).
+//  · 묶인 줄 + 앞 줄 + 뒤 DC_WRAP_ROWS 줄 길이 합(UTF-16)이 DC_WIN_MAX 를 넘으면 null(옛 길) · 닻이 DC_WIN_MAX 보다 긴 줄에 닿으면 칸 걸음 전에 null · text 가 DC_BIND_MAX 를 넘으면 처음부터 null.
+//  · 끝 칸도 같은 논리 줄이어야 한다(아니면 null) · 시작 칸에서 «시작하는» 글자가 없으면 null.
+// [주의] 글 끝의 개행이 만드는 빈 조각은 줄로 세지 않는다(마지막 개행 = 종결 부호).
+// [주의] 가드: 같은 열에 같은 낱말이 화면 위치로 가능한 오프셋 안에 또 있으면 묶지 않고 옛 길(032f193)로 간다.
+export function dcBind({ sel, cols, rows, text, clip, total, cut } = {}) {
+  const o = orderSel(sel);
+  if (!o || !posInt(cols) || !posInt(rows) || typeof text !== "string" || o.s.col >= cols || o.e.col >= cols || !posInt(total)) return null;
+  if (text.length > DC_BIND_MAX) return null;
+  const w = dcWord(clip, sel);
+  if (w === null) return null;
+  const lines = text.split(/\r\n|\n|\r/);
+  const n = lines.length > 1 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+  const rc = new Array(n), st = new Array(n + 1);   // st[j] = 줄 j 의 시작 행(글 기준 · 불확실 줄은 lo 폭 행 수)
+  st[0] = 0;
+  const bud = { left: DC_WALK_MAX };                 // 느린 걸음 예산(행 수 · 칸 걸음 · 가드 찾기 · 가드 걸음이 같이 쓴다)
+  let unc = -1;                                      // 행 수가 불확실한 마지막 줄
+  for (let j = 0; j < n; j++) {
+    const r = dcRowsOf(lines[j], cols, bud);
+    if (r === 0) return null;                        // 예산 초과 또는 묶음 위험 줄(잘린 읽기에서도 하한이 아니다)
+    if (r < 0) { if (!cut) return null; unc = j; }   // 안 잘린 읽기(위 붙임)는 «위» 줄 행 수에 기댄다 → 하나라도 불확실이면 null
+    st[j + 1] = st[j] + (rc[j] = r < 0 ? -r : r);
+  }
+  const R = st[n], d = total - R;
+  if (d < 0 || (!cut && d > rows)) return null;      // 글이 total 보다 큼 · 안 잘린 읽기는 끝 빈 행 ≤ rows 만
+  const find = (row) => {
+    let lo = 0, hi = n - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (st[mid] <= row) lo = mid; else hi = mid - 1; }
+    return lo;
+  };
+  const rLo = Math.min(Math.max(o.s.row - d, 0), R - 1), rHi = Math.min(o.s.row, R - 1);   // 가능한 오프셋 [0, d] 가 낼 수 있는 첫 글자의 글 기준 행 범위(rLo ≤ rHi)
+  const L0 = find(rLo);
+  if (unc >= L0) return null;                        // 잘린 읽기: j0 = L0 부터 끝 줄까지 행 수 불확실이 없어야 한다
+  const off = !cut ? 0 : d;
+  const row = o.s.row - off;
+  if (row < 0 || row >= R) return null;
+  const hi = find(row);
+  if (lines[hi].length > DC_WIN_MAX || dcHazard(lines[hi])) return null;    // 큰 줄은 걸음을 안 돈다(동기 상한) · 묶음 위험 줄은 칸을 믿지 않는다
+  const start = st[hi] + off;
+  if (o.e.row >= start + rc[hi]) return null;
+  if ((bud.left -= lines[hi].length) < 0) return null;   // 묶인 줄 칸 걸음 예산
+  const rg = dcCells(lines[hi], cols, o.s.row - start, o.s.col, o.e.row - start, o.e.col);
+  if (!rg || rg === DC_UNSURE || lines[hi].slice(rg.a, rg.b) !== w) return null;   // 자체 검사: 그 자리 글자가 선택한 글과 다르면 묶지 않는다
+  let win = lines[hi].length;
+  if (hi > 0) win += lines[hi - 1].length;
+  for (let j = hi + 1; j <= hi + DC_WRAP_ROWS && j < n; j++) win += lines[j].length;
+  if (win > DC_WIN_MAX) return null;
+  // 모호함 가드: 범위 안 줄의 다른 등장(닻이 묶은 하나만 뺀다)
+  let occ = 0;
+  for (let L = L0, Le = find(rHi); L <= Le; L++) {
+    const line = lines[L], ks = [];
+    // 가드 찾기 예산: indexOf 는 QuickJS 에서 순진한 탐색(비교 ≈ 줄 길이 × 낱말 길이)이라 «찾기 전에» 모든 줄(묶인 줄 · 행 수 느린 길 줄 포함)에서 뺀다. 빈 줄 = 0.
+    if ((bud.left -= Math.ceil(line.length * w.length / DC_FIND_DIV)) < 0) return null;
+    for (let k = line.indexOf(w); k >= 0; k = line.indexOf(w, k + 1)) {
+      if (L === hi && k === rg.a) continue;
+      if (++occ > 256) return null;
+      ks.push(k);
+    }
+    if (!ks.length) continue;
+    if ((bud.left -= line.length) < 0) return null;   // 등장이 있는 줄은 줄 전체를 뺀다 — 위험 줄 검사(정규식이 줄 전체를 훑는다)와 dcPos 걸음을 덮는다(찾기 값은 이 둘을 덮지 않는다) · 검사 «앞»
+    if (line.length > DC_WIN_MAX || dcHazard(line)) return null;
+    const ps = dcPos(line, cols, ks);
+    if (ps === DC_UNSURE) return null;
+    for (const [r, c] of ps) {
+      if (c !== o.s.col) continue;
+      const imp = o.s.row - (st[L] + r);
+      if (imp >= 0 && imp <= d) return null;
+    }
+  }
+  return { lines, i: hi, a: rg.a, b: rg.b };
+}
+
+// 묶이지 않는 길(옛 규칙)이 보는 글: 깊게 읽은 전체 글에서 끝 keep 줄만 남기고(끝 개행은 종결 부호라 줄로 세지 않는다) 마지막 maxUnits 글자(UTF-16)만. keep 줄 이하 · maxUnits 이하면 글 그대로 — 032f193 이 읽던 것과 같다.
+export function dcOldText(text, keep, maxUnits) {
+  let t = String(text ?? "");
+  if (Number.isInteger(keep) && keep >= 0) {
+    let i = t.length > 0 && t.endsWith("\n") ? t.length - 1 : t.length;
+    for (let k = 0; k < keep && i >= 0; k++) i = i > 0 ? t.lastIndexOf("\n", i - 1) : -1;
+    if (i >= 0) t = t.slice(i + 1);
+  }
+  return t.length > maxUnits ? t.slice(-maxUnits) : t;
+}
+
 // dcPick allowlist(QuickJS: `u` 플래그·\p{} 없음 → \uXXXX 범위). pre = `*` · 여는 괄호/따옴표. post = `#L12C3` 꼬리 → 닫는 장식 → (한글·가나로 시작하는 조사 + 꼬리 한 부류).
 // 이어짐 시작 = 한글·가나만(U+1100–115E · 3040–30FF · 3131–3163 · 3165–318E · AC00–D7A3 — 한자 시작 불허). 꼬리 = 한글 자모(1161–11FF · D7B0–D7FF 포함)·가나(결합 탁점 3099/309A 포함)·호환 자모·한자·완성형 한글·닫는 장식뿐.
 // 보이지 않는 한글 채움 문자(U+115F · 1160 · 3164 · FFA0)는 시작에도 꼬리에도 불허 — `a.md` + 채움 + `사본` 이 공백으로 나뉜 선택처럼 보이지만 열리는 일이 없게. ASCII 글자·숫자·`/`·`=`·결합/제어 부호·공백도 어디서든 불허.
@@ -512,49 +744,160 @@ function dcWrapHeadOk(h) {
   const c = [...h];
   return c.length >= 1 && c.length <= 8 && DC_HEAD.test(c[0]) && c.slice(1).every(ch => DC_LETTER.test(ch));
 }
-export const NAME_MAX_UNITS = 255, DC_TAIL_STEPS = 8, DC_MAX_WRAP = 4, DC_MAX_PROBES = (DC_TAIL_STEPS + 1) + DC_MAX_WRAP;   // 꼬리(전체 + 앞 8 글자씩) 9 + 줄바꿈 4 = 13 — 줄바꿈 탐침이 상한에 밀려 빠지지 않게
+// 묶인 모드(bd)는 앞 접두/거울 탐침 1 + 줄바꿈 사슬 DC_WRAP_ROWS 개 · 옛 모드는 줄바꿈 DC_MAX_WRAP 개 — 상한은 둘 중 큰 쪽(꼬리 9 + 4 = 13)이라 어느 탐침도 상한에 밀려 빠지지 않는다.
+// 묶인 모드 구조상 최대 13(상한과 같음 → 어느 탐침도 밀려 빠지지 않는다): 줄바꿈 사슬이 서면 이름 뒤 글자줄이 8 자 이하라 꼬리 탐침은 걸음 8 + 선택한 꼬리 1 이하 → 9 + 접두/거울 1 + 사슬 3 · 사슬이 없으면 선택한 꼬리 1 + 전체 1 + 걸음 8 + 접두/거울 1 = 11. 시험이 만든 최대는 12.
+export const NAME_MAX_UNITS = 255, DC_TAIL_STEPS = 8, DC_MAX_WRAP = 4, DC_WRAP_ROWS = 3, DC_MAX_PROBES = (DC_TAIL_STEPS + 1) + Math.max(DC_MAX_WRAP, 1 + DC_WRAP_ROWS);
 
-// 클립보드 + 선택 + 터미널 글자 → 풀어 볼 후보 글(없으면 null). 클립보드는 고르는 데만 쓴다:
-//  1) 정리(dcWord) · 2) cellWidth(clip) === selSpan 이어야 한다(다르면 선택과 클립보드가 다른 것 — 낡은 클립보드)
-//  3) 공백이 든 글은 null · scanText(clip) 후보가 정확히 하나(own)여야 한다. clip = 앞 `*` + own + 뒤 장식(`#L12C3` · `#L1-L3` · `*?!。、.,;:」`) · 앞 `*「` · 붙은 한글/가나/CJK 조사(`plan.md를`)뿐일 때만 통과(allowlist) — 그 밖의 앞뒤 글자(`.jsonl` · `.bak` · `.gz`)가 있으면 다른 이름이라 null
-//  4) 터미널 글자 전체(상한 없음)의 scanText(text).cands 에 own 이 그대로 있어야 한다 → 터미널 쪽 사본을 돌려준다
-// [경고] 클립보드는 믿을 수 없는 입력(비밀번호 · 다른 앱의 글)이다. 터미널 글자에 없는 글은 절대 돌려주지 않는다 — 반환값은 늘 터미널 글자에서 나온 후보다.
-// [주의] 허용 목록은 `data.csvの备份` · `보고서.pdf사본` 처럼 «더 긴 이름» 인 선택도 통과시킨다(승인된 `config.yamlを更新しました` 와 글자만으로는 구별 불가) → 더 긴 이름이 실제로 있는지는 dcLonger + dcChoose 가 파일 시스템으로 가린다.
-export function dcPick({ clip, sel, cols, text }) {
+// ── 묶인 모드(bd !== null) 공용 ──
+// 이름 오른쪽 «이어짐»: 영숫자 · `_` · 결합 부호, 또는 `. - / +` 바로 뒤에 영숫자 · `_`(`data.json`+`l` · `a.md`+`.bak` · `x.js`+`-old`). 닫는 장식(`x.js.` · `x.js:42` · `x.js)` · `**x.js**` · `x.js#L4`)은 이어짐이 아니다.
+const DC_CONT = /^(?:[A-Za-z0-9_]|[\u0300-\u036F]|[.\-/+][A-Za-z0-9_])/;
+const DC_LEFT_CH = /[A-Za-z0-9._~/-]/, DC_PRE_CH = /^[*\u300C\u300E\u00AB\u201C\u2018\u3010\u300A\u3008]$/;
+const DC_PREFIX = /^(?:\/|~\/)?(?:[A-Za-z0-9._-]{1,64}\/){0,8}$/, DC_MIRROR = /^(?:\/|~\/)?(?:[A-Za-z0-9._-]{1,64}\/){1,8}$/;
+const DC_PATH_MAX = 128;
+// 이름 바로 왼쪽이 `/` 일 때 그 폴더 접두: 줄에서 os 앞 `[A-Za-z0-9._~/-]` 최대 연속(P) — 줄 머리 · 공백 · 상자선 · 허용 앞 장식 바로 뒤에서 시작하는 «한 토큰» 이고 모양 · 128 자가 맞을 때만. 아니면 null.
+function dcLeftPrefix(line, os) {
+  const B = line.slice(Math.max(0, os - DC_PATH_MAX - 3), os);
+  let s = B.length;
+  while (s > 0 && DC_LEFT_CH.test(B[s - 1])) s--;
+  const P = B.slice(s);
+  if (!P.endsWith("/") || P.length > DC_PATH_MAX || !DC_PREFIX.test(P)) return null;
+  if (s > 0) { const c = B[s - 1]; if (!WS.test(c) && !isBox(c) && !DC_PRE_CH.test(c)) return null; }
+  return P;
+}
+const onlyWsBox = (s) => { for (let i = 0; i < s.length; i++) if (!WS.test(s[i]) && !isBox(s[i])) return false; return true; };
+// bd 에서 이름(own)이 줄 안에서 차지하는 범위와 앞 줄 · 뒤 줄들. 자체 검사를 한 번 더 한다(방어: bd 가 이 선택 · 클립보드 것이 아니면 null).
+function dcBound(bd, w, p) {
+  const line = bd?.lines?.[bd.i];
+  if (typeof line !== "string" || !Number.isInteger(bd.a) || line.slice(bd.a, bd.b) !== w) return null;
+  const os = bd.a + p.pre.length;
+  return { line, os, oe: os + p.own.length, prev: bd.i > 0 ? bd.lines[bd.i - 1] : null, next: bd.lines.slice(bd.i + 1, bd.i + 1 + DC_WRAP_ROWS) };
+}
+
+// dcPick 앞부분(터미널 글을 안 본다): 정리 · 칸 수 · 후보 하나 · 장식/조사 허용 목록 → { w, p } | null. 장식 · 붙은 조사만 허용 — `data.jsonl` 처럼 이름이 라틴 글자·숫자로 더 이어지면 다른 파일.
+function dcShape(clip, sel, cols) {
   const w = dcWord(clip, sel);
   if (w === null) return null;
   const span = selSpan(sel, cols);
   if (span === null || cellWidth(w) !== span) return null;
   const p = dcParts(w);
-  if (!p || !DC_PRE.test(p.pre) || !DC_POST.test(p.post)) return null;   // 장식 · 붙은 조사만 허용 — `data.jsonl` 처럼 이름이 라틴 글자·숫자로 더 이어지면 다른 파일
+  return !p || !DC_PRE.test(p.pre) || !DC_POST.test(p.post) ? null : { w, p };
+}
+// 깊게 읽기 전 싼 검사: 클립보드 모양이 dcPick 앞부분을 통과하는지 참/거짓만(글 · 조각은 밖으로 내지 않는다).
+export function dcClipShape({ clip, sel, cols } = {}) { return dcShape(clip, sel, cols) !== null; }
+
+// 클립보드 + 선택 + 터미널 글자 → 풀어 볼 후보 글(없으면 null). 클립보드는 고르는 데만 쓴다:
+//  1) 정리(dcWord) · 2) cellWidth(clip) === selSpan 이어야 한다(다르면 선택과 클립보드가 다른 것 — 낡은 클립보드)
+//  3) 공백이 든 글은 null · scanText(clip) 후보가 정확히 하나(own)여야 한다. clip = 앞 `*` + own + 뒤 장식(`#L12C3` · `#L1-L3` · `*?!。、.,;:」`) · 앞 `*「` · 붙은 한글/가나/CJK 조사(`plan.md를`)뿐일 때만 통과(allowlist) — 그 밖의 앞뒤 글자(`.jsonl` · `.bak` · `.gz`)가 있으면 다른 이름이라 null
+//  4) 터미널 글자 전체(상한 없음)의 scanText(text).cands 에 own 이 그대로 있어야 한다 → 터미널 쪽 사본을 돌려준다
+//  묶인 모드(bd = dcBind 결과): 4) 대신 «그 줄 + 앞 줄 + 뒤 DC_WRAP_ROWS 줄» 의 후보에 own 이 있어야 하고, 그 자리의 오른쪽(이어지는 이름 글자 → null) · 왼쪽(`myplan.md` 를 `plan.md` 로 끌어 고름 → null · `/` 면 폴더 접두 모양이 맞을 때만)을 본다. 한 줄 선택 꼬리 fail-closed 는 없다(꼬리는 묶인 줄에서 온다).
+// [경고] 클립보드는 믿을 수 없는 입력(비밀번호 · 다른 앱의 글)이다. 터미널 글자에 없는 글은 절대 돌려주지 않는다 — 반환값은 늘 터미널 글자에서 나온 후보다.
+// [주의] 허용 목록은 `data.csvの备份` · `보고서.pdf사본` 처럼 «더 긴 이름» 인 선택도 통과시킨다(승인된 `config.yamlを更新しました` 와 글자만으로는 구별 불가) → 더 긴 이름이 실제로 있는지는 dcLonger + dcChoose 가 파일 시스템으로 가린다.
+export function dcPick({ clip, sel, cols, text, bd = null }) {
+  const h = dcShape(clip, sel, cols);
+  if (h === null) return null;
+  const { w, p } = h;
+  if (bd) {
+    const g = dcBound(bd, w, p);
+    if (!g) return null;
+    if (DC_CONT.test(g.line.slice(g.oe, g.oe + 2))) return null;                  // 오른쪽에 이름이 더 이어진다(`data.json` + `l`)
+    if (p.pre === "" && g.os > 0) {                                                  // 왼쪽: 앞 이름 글자가 붙어 있으면 낱말의 뒷부분만 고른 것
+      const c = g.line[g.os - 1];
+      if (/[A-Za-z0-9_.-]/.test(c) || (c === "/" && dcLeftPrefix(g.line, g.os) === null)) return null;
+    }
+    const win = (g.prev === null ? [] : [g.prev]).concat([g.line], g.next).join("\n");
+    return scanText(win, { max: Infinity, maxCode: Infinity }).cands.includes(p.own) ? g.line.slice(g.os, g.oe) : null;   // 터미널 줄의 조각(= p.own)
+  }
   const own = scanText(text, { max: Infinity, maxCode: Infinity }).cands.find(c => c === p.own) ?? null;
   if (own === null) return null;
-  // [주의] 한 줄 선택에서 꼬리(글자줄)가 터미널 글자에 없으면 더 긴 이름을 확인할 수 없다(읽은 줄 밖 · NFC/NFD 차이) → 짧은 파일도 열지 않는다(fail-closed). 여러 줄(줄바뀜) 선택은 그대로.
+  // [주의] 한 줄 선택에서 꼬리(글자줄)가 터미널 글자에 없으면 더 긴 이름을 확인할 수 없다(읽은 줄 밖 · 클립보드 NFC / 터미널 NFD 차이) → 짧은 파일도 열지 않는다(fail-closed). 여러 줄(줄바뀜) 선택은 그대로.
   const o = orderSel(sel), run = dcTailRun(p.post);
   if (o.s.row === o.e.row && run.length && !text.includes(own + run.join(""))) return null;
   return own;
 }
 
 // «더 긴 이름» 탐침(순수) — cand 에 글자가 더 붙은 이름이 진짜 있으면 열지 않기 위해(dcChoose) RESOLVE_SCRIPT 에 같이 보낼 글들. 최대 DC_MAX_PROBES(13) 개.
+//  옛 모드(bd 없음 · 묶이지 않음):
 //  · 꼬리 탐침: 클립보드 post 가 글자(한글·가나·한자)로 바로 시작하고 text 에 `cand + 글자줄` 이 그대로 있으면 → cand + 글자줄의 앞 k 글자(k=1..8) + 전체.
 //    text 에 없으면 탐침 없음(한 줄 선택이면 dcPick 이 이미 null 로 막는다 · 여러 줄 선택은 줄바꿈 탐침만).
 //  · 줄바꿈 탐침: 줄 끝 토큰이 cand(+ 허용 꼬리)로 끝나고 다음 줄 머리가 «좁은 이어짐 모양»(dcWrapHeadOk)이면 → cand + 그 꼬리 + 다음 줄 머리 토큰(`a.md` / `.bak` → `a.md.bak`). 최신 줄부터 4 개까지.
-//  · 모든 탐침: 글롭 글자 · 제어문자 없음 · 마지막 조각 255 단위(UTF-16) 이하 · cand 와 이름이 같지 않음.
+//  묶인 모드(bd = dcBind 결과 · 선택한 그 자리만 본다 · 전체 글 훑기 없음):
+//  · 선택한 꼬리: 선택이 이름 뒤까지 닿았으면(bd.b > oe) line.slice(os, bd.b) — 선택한 글 그대로의 터미널 조각 — 을 가장 먼저.
+//  · 꼬리: 그 줄에서 이름 오른쪽이 장식 없이 글자줄로 바로 시작하면 → 같은 꼬리 탐침(줄에서 자른다 · 클립보드 post 와 무관 · 선택 밖 글자는 많아야 DC_TAIL_STEPS).
+//  · 왼쪽 접두: 이름 바로 왼쪽이 `/` 이면 그 폴더 접두 + 이름(`docs/` + `plan.md`). 모양 · 128 자 · 한 토큰 조건은 dcLeftPrefix. 접두 · 거울은 cand 가 «평범한 상대 이름»(`/` · `~/` 로 시작하지 않고 `.` · `..` 조각 없음)일 때만.
+//  · 거울: 이름이 줄의 핵심 머리(왼쪽이 공백 · 상자선뿐)이고 앞 줄 끝 토큰이 `/` 로 끝나는 폴더 모양이면 → 그 토큰 + 이름. `/` 로 끝나지 않는 앞 줄 토큰은 절대 붙이지 않는다(앞 줄의 아무 글이 sh -c 인자로 새는 길).
+//  · 줄바꿈 사슬: 이름(+ 같은 줄 꼬리 8 자 이하)이 줄의 마지막 토큰이고 줄 끝이 닫는 장식이 아니면 다음 줄 머리(dcWrapHeadOk) → 이름 + 꼬리 + h1. 그 줄의 핵심이 h1 뿐이면 다음 줄로 이어 h1+h2 · … DC_WRAP_ROWS 줄까지.
+//  · 모든 탐침: 글롭 글자 · 제어문자 없음 · 마지막 조각 255 단위(UTF-16) 이하 · cand 와 이름이 같지 않음(접두 · 거울 탐침만 같은 이름 — 폴더만 다르다 · dcChoose 가 cand 의 기대 경로 E 하나만 있을 때만 연다).
 // [경고] 클립보드는 믿을 수 없는 입력이다 — 모든 탐침은 text 에서 자른 조각 + cand(터미널 쪽 후보)로만 만든다. 클립보드 글 자체는 어떤 탐침에도 들어가지 않는다.
-// [주의] 줄바꿈은 바로 다음 한 줄만 본다 · 이름이 줄 머리에 있고 앞 줄이 `docs/` 로 끝나는 거울 경우는 보지 않는다.
-export function dcLonger({ clip, sel, text, cand }) {
+// [주의] 옛 모드의 줄바꿈은 바로 다음 한 줄만 본다 · 이름이 줄 머리에 있고 앞 줄이 `docs/` 로 끝나는 거울 경우는 묶인 모드에서만 본다.
+export function dcLonger({ clip, sel, text, cand, bd = null }) {
   if (typeof cand !== "string" || !cand || typeof text !== "string") return [];
   const out = [], seen = new Set([cand]);
   const baseOf = (s) => s.slice(s.lastIndexOf("/") + 1);
   const cb = baseOf(cand);
-  const push = (s) => {
-    // 방어: 호출 구조상 out.length 는 상한(13)에 닿지 않는다(꼬리 9 + 줄바꿈 4)
+  const push = (s, sameBase = false) => {
+    // 방어: 호출 구조상 상한(13)에 닿아도 밀리는 탐침은 없다(옛 모드 꼬리 9 + 줄바꿈 4 · 묶인 모드 구조상 최대 13 = 위 DC_MAX_PROBES 주석)
     if (out.length >= DC_MAX_PROBES || seen.has(s) || CTRL.test(s) || GLOB.test(s) || utf8Len(s) > MAX_TOKEN_BYTES) return;
     const b = baseOf(s);
-    // 방어: b === cb 는 seen(cand) 과 DC_POST 로 이미 걸러진다
-    if (b === cb || b.length > NAME_MAX_UNITS) return;
+    // 방어: b === cb 는 seen(cand) 과 DC_POST 로 이미 걸러진다 — 접두 · 거울 탐침(sameBase)만 이름이 같다(폴더만 다름)
+    if ((b === cb && !sameBase) || b.length > NAME_MAX_UNITS) return;
     seen.add(s); out.push(s);
   };
+  if (bd) {
+    const w = dcWord(clip, sel), p = w === null ? null : dcParts(w);
+    if (!p || p.own !== cand || !DC_PRE.test(p.pre) || !DC_POST.test(p.post)) return out;
+    const g = dcBound(bd, w, p);
+    if (!g) return out;
+    const { line, os, oe, prev, next } = g;
+    // 선택한 꼬리 탐침: 선택이 이름 뒤까지 닿았으면(bd.b > oe) 선택한 글 그대로의 터미널 조각을 다른 꼬리 탐침보다 먼저 싣는다(선택한 더 긴 이름 확인 — 꼬리가 8 글자 걸음을 넘어도 빠지지 않게).
+    if (bd.b > oe) push(line.slice(os, bd.b));
+    // 꼬리 탐침(줄에서 자른다)
+    // [경고] 선택 밖 꼬리 글자는 많아야 DC_TAIL_STEPS(8) — 줄 끝까지 긴 글자줄이 sh -c 인자로 새지 않게(줄바꿈 사슬과 같은 정책). 선택 안 글자(bd.b 앞)는 셈에서 뺀다.
+    const run0 = dcTailRun(line.slice(oe, oe + NAME_MAX_UNITS + 1));
+    let inside = 0;
+    for (let k = 0, u = 0; k < run0.length && u < bd.b - oe; k++) { inside++; u += run0[k].length; }
+    const run = run0.slice(0, inside + DC_TAIL_STEPS), full = run.join("");
+    if (full) {
+      push(line.slice(os, oe + full.length));
+      let len = cand.length;
+      for (let k = 0; k < Math.min(run.length, DC_TAIL_STEPS); k++) { len += run[k].length; push(line.slice(os, os + len)); }
+    }
+    // 왼쪽 접두 · 거울 — «평범한 상대 이름» cand 에만(`/` · `~/` 로 시작하거나 `.` · `..` 조각이 있으면 탐침 없음 → dcChoose 가 cand 하나만 본다)
+    const plain = !cand.startsWith("/") && !cand.startsWith("~/") && !cand.split("/").some(c => c === "." || c === "..");
+    if (!plain) { /* 접두 · 거울 탐침 없음 */ }
+    else if (p.pre === "" && os > 0 && line[os - 1] === "/") {
+      const P = dcLeftPrefix(line, os);
+      if (P !== null) push(P + cand, true);
+    } else if (prev !== null && onlyWsBox(line.slice(0, os))) {
+      const pe = coreEnd(prev);
+      if (pe && !isCut(pe[pe.length - 1])) {
+        const Pv = lastTok(pe);
+        if (Pv.length <= DC_PATH_MAX && DC_MIRROR.test(Pv)) push(Pv + cand, true);
+      }
+    }
+    // 줄바꿈 사슬
+    const ce = coreEnd(line);
+    if (ce && !isCut(ce[ce.length - 1]) && next.length) {
+      const ts = ce.length - lastTok(ce).length;
+      if (os >= ts && oe <= ce.length) {
+        const post = ce.slice(oe);
+        // [경고] 같은 줄 이름 뒤 글은 «없음 · 글자 8 자 이하» 만(일본어 절 · `#L…` 숫자열이 sh -c 인자로 새지 않게)
+        if (DC_PRE.test(ce.slice(ts, os)) && DC_POST.test(post) && (post === "" || (dcTailRun(post).join("") === post && [...post].length <= DC_TAIL_STEPS))) {
+          let acc = cand + post;
+          for (const nl of next) {
+            const n = coreStart(nl);
+            if (!n || isCut(n[0]) || WS.test(n[0])) break;
+            const h = firstTok(n);
+            if (!dcWrapHeadOk(h)) break;
+            const after = n[h.length];
+            if (after !== undefined && !WS.test(after) && !isBox(after)) break;   // 머리 토큰은 한 낱말 전체여야 한다
+            acc += h; push(acc);
+            if (coreEnd(n) !== h) break;                                           // 그 줄이 머리 토큰뿐일 때만 다음 줄로 이어 본다
+          }
+        }
+      }
+    }
+    return out;
+  }
   // 꼬리 탐침
   const w = dcWord(clip, sel), p = w === null ? null : dcParts(w);
   if (p && p.own === cand && DC_PRE.test(p.pre) && DC_POST.test(p.post)) {
@@ -594,15 +937,25 @@ export function dcLonger({ clip, sel, text, cand }) {
 // RESOLVE_SCRIPT 출력 + cand + 탐침들 → 열 절대 경로(없으면 null). 레코드 이름(= 준 이름의 마지막 조각)으로 짝을 짓는다.
 //  · 탐침(더 긴 이름) 이름의 파일이 하나라도 나오면 null — 더 긴 파일만 있어도 연다 안 한다(미리보기 못 하는 종류일 수 있고 원격이면 내려받는다)
 //  · 아니면 cand 이름의 레코드가 정확히 하나일 때만 그 경로
+//  · 같은 이름 탐침(S: 접두 · 거울 — 폴더만 다름)이 있으면: `=` 레코드의 cwd 실제 경로로 cand 의 기대 경로 E 를 만들어(상대 = root/cand · 절대 = cand · `~/` = null) 같은 이름 레코드가 정확히 E 하나일 때만 연다.
+//    다른 같은 이름 레코드(= 접두 파일)가 있거나 E 가 없으면(접두 파일만 있음 · 링크 폴더로 경로가 다름) null — 더 긴 이름을 확인하지 못했거나 있으면 열지 않는다. `=` 가 없거나 제어문자가 들면 null.
 export function dcChoose(stdout, cand, longer = []) {
   if (typeof cand !== "string" || !cand) return null;
   const baseOf = (s) => s.slice(s.lastIndexOf("/") + 1);
   const cb = baseOf(cand), lb = new Set(longer.map(baseOf));
+  let E = null;
+  if (longer.some(l => baseOf(l) === cb)) {
+    const eq = String(stdout ?? "").split("\0").find(r => r.startsWith("="));
+    const root = eq === undefined ? "" : eq.slice(1);
+    if (!root.startsWith("/") || CTRL.test(root) || cand.startsWith("~/")) return null;
+    E = cand.startsWith("/") ? cand : (root === "/" ? "/" : root + "/") + cand;
+  }
   const hits = [];
   for (const r of parseResolved(stdout, { max: Infinity })) {
     const b = baseOf(r);
     if (lb.has(b) && b !== cb) return null;
     if (b === cb) hits.push(r);
   }
+  if (E !== null) return hits.length === 1 && hits[0] === E ? E : null;
   return hits.length === 1 ? hits[0] : null;
 }
