@@ -1196,28 +1196,26 @@ test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_
   // 묶기(dcBind): total 은 읽기 앞 · 뒤가 같을 때만 · how 가 history 가 아니면(stitched · 모르는 값) 묶지 않는다 · 깊이 · 글 상한 · 묶이지 않는 글은 032f193 이 보던 것
   const iTb = body.indexOf("const tb = dcTotal(addr);"), iRead = body.indexOf("await hcLimited("), iTot = body.indexOf("tb === dcTotal(addr)");
   assert.ok(iTb > 0 && iRead > iTb && iTot > iRead, "total 은 읽기 앞에서 한 번 · 뒤에서 한 번");
-  assert.ok(body.includes('rd?.how !== "history" ? null : dcBind('), "how 가 history 가 아니면(stitched · 모르는 값) 묶지 않는다");
+  assert.ok(body.includes("const binds = canSleep && total !== null && rd?.how === \"history\";") && body.includes("const bd = binds ? dcBind({"), "묶기는 binds 일 때만(how 가 history 가 아니면 · total 을 모르면 · cx.sleep 이 없으면 묶지 않는다 — 동작은 아래 «dcTick 동작» 시험)");
+  assert.ok(body.includes("const canSleep = typeof cx.sleep === \"function\";") && body.includes("if (canSleep && tb !== null) {"), "깊게 읽기는 쉴 수 있을 때만");
   assert.ok(body.includes("dist <= DC_READ_MAX") && body.includes("Math.min(DC_READ_MAX, Math.max(TF_LINES, dist + 2))"), "읽기 깊이");
-  assert.ok(src.includes("DC_READ_MAX = 20000, DC_TEXT_MAX = 4 * 1024 * 1024") && body.includes("full.slice(-DC_TEXT_MAX)") && body.includes("const cut = full.length > DC_TEXT_MAX || (full.length <= DC_BIND_MAX && dcReadCut(full, n));"), "글 상한 + cut");
+  assert.ok(src.includes("DC_READ_MAX = 20000, DC_TEXT_MAX = 4 * 1024 * 1024") && body.includes("full.slice(-DC_TEXT_MAX)") && body.includes("const cut = full.length > DC_TEXT_MAX || (binds && full.length <= DC_BIND_MAX && dcReadCut(full, n));"), "글 상한 + cut(줄 수는 묶을 때만 센다)");
   // dcReadCut 은 글이 DC_BIND_MAX 이하일 때만(넘으면 dcBind 가 null) — 한 곳에서만 불리고 import 에 DC_BIND_MAX 가 있다
   assert.equal(code.filter(l => /\bdcReadCut\(/.test(l)).length, 1, "dcReadCut 호출은 한 곳");
-  assert.ok(code.some(l => /\bdcReadCut\(/.test(l) && l.includes("full.length <= DC_BIND_MAX && dcReadCut(full, n)")), "dcReadCut 은 full.length <= DC_BIND_MAX 일 때만");
+  assert.ok(code.some(l => /\bdcReadCut\(/.test(l) && l.includes("binds && full.length <= DC_BIND_MAX && dcReadCut(full, n)")), "dcReadCut 은 묶을 때(binds) · full.length <= DC_BIND_MAX 일 때만");
   assert.ok(/import \{[^}]*\bDC_BIND_MAX\b[^}]*\} from "\.\/termfiles\.js"/.test(src), "main.js import 에 DC_BIND_MAX");
   assert.ok(body.includes("dcOldText(full, n === TF_LINES ? null : TF_LINES + ") && body.includes(", TF_TEXT)"), "묶이지 않는 글: 깊게 안 읽었으면 그대로(032f193) · 깊게 읽었으면 끝 TF_LINES + rows 줄 → TF_TEXT");
   assert.ok(src.includes("Number.isInteger(p.scroll?.total)") && !src.includes("Number.isFinite(p.scroll?.total)"), "total 은 정수만");
-  assert.ok(body.includes('rd?.how !== "history" ? null : dcBind(') && body.includes("total === null || rd?.how"), "total 을 모르면 묶지 않는다");
   assert.ok(src.includes("const dcTotal = (addr) =>") && /m\.length === 1 \? m\[0\]\.scroll\.total : null/.test(src), "total = 숫자 scroll.total 항목이 정확히 하나일 때만");
   assert.ok(!SHARED_OR_NOTE.test(code.join("\n")), "setShared · notify · tfNote · this.tf* 금지");
   const aw = lines.map((l, i) => (/\bawait /.test(l) ? i : -1)).filter(i => i >= 0);
   assert.equal(aw.length, 5, "await 다섯(pbpaste · hc read · 쉼 둘 · resolve)");
-  // 긴 동기 조각 나누기: JSON.parse → (쉼 + gen) → dcBind → (쉼 + gen) → dcOldText/dcPick. 묶기가 도는 때만 쉰다(binds)
+  // 긴 동기 조각 나누기(동작은 «dcTick 동작» 시험): 쉼은 둘 · 둘 다 같은 줄에서 gen 확인 · 순서 JSON.parse → 쉼 → dcBind → 쉼 → dcOldText → dcPick
   const iParse = body.indexOf("JSON.parse(r.stdout)"), iBind = body.indexOf("dcBind({"), iOld = body.indexOf("dcOldText("), iPick = body.indexOf("dcPick({");
-  const yieldRe = /if \(binds\) \{ await cx\.sleep\(0\); if \(gen !== this\.dcGen\) return; \}/g;
-  const ys = [...body.matchAll(yieldRe)].map(m => m.index);
-  assert.equal(ys.length, 2, "쉼 + gen 확인 둘");
-  assert.ok(iParse > 0 && ys[0] > iParse && ys[0] < iBind && ys[1] > iBind && ys[1] < iOld && iOld < iPick, "쉼 하나는 JSON.parse 와 dcBind 사이 · 하나는 dcBind 와 dcOldText · dcPick 사이");
-  assert.ok(body.includes("const binds = total !== null && rd?.how === \"history\";"), "binds = dcBind 가 실제로 도는 때만");
-  assert.equal((body.match(/cx\.sleep\(/g) ?? []).length, 2, "cx.sleep 둘뿐");
+  const sl = [...body.matchAll(/await cx\.sleep\(0\); if \(gen !== this\.dcGen\) return;/g)].map(m => m.index);
+  assert.equal(sl.length, 2, "쉼 + gen 확인 둘");
+  assert.equal((body.match(/cx\.sleep\(/g) ?? []).length, 2, "cx.sleep 호출 둘뿐");
+  assert.ok(iParse > 0 && sl[0] > iParse && sl[0] < iBind && sl[1] > iBind && sl[1] < iOld && iOld < iPick, "쉼 하나는 JSON.parse 와 dcBind 사이 · 하나는 dcBind 와 dcOldText 사이");
   for (const i of aw) assert.ok(/^\s*if \(gen !== this\.dcGen\) return;/.test(lines[i + 1] ?? "") || /await [^;]+; if \(gen !== this\.dcGen\) return;/.test(lines[i]), `await 다음에 dcGen 확인 없음: ${lines[i].trim().slice(0, 60)}`);
   assert.ok(body.includes("if (!this.mac || this.closed) return;"), "macOS 전용");
   assert.equal(code.join("\n").match(/\bterminals\(\)/g)?.length, 1, "terminals() 호출은 하나(ts 를 cols 에도 쓴다)");
@@ -1240,3 +1238,145 @@ test("main.js: dcTick — exec 인자는 상수 pbpaste 스크립트와 RESOLVE_
   assert.ok(src.includes("try { this.dcTick(cx); } catch {"), "inbox 가 따로 try/catch 로 부른다");
 });
 const SHARED_OR_NOTE = /\bsetShared\b|\bnotify\(|tfNote|this\.tf[A-Z]/;
+
+// ── dcTick 동작 시험: main.js 의 진짜 dcTick 메서드를 꺼내 가짜 호스트로 돌린다(쉼 · 깊게 읽기 · 묶기 · 열기). 순수 함수는 termfiles.js 진짜 + 호출 순서 기록(spy).
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, realpathSync } from "node:fs";
+import * as TF from "../files-plus/termfiles.js";
+
+const DC_SRC = await readFile(new URL("../files-plus/main.js", import.meta.url), "utf8");
+const dcTickSrc = (() => {
+  const from = DC_SRC.indexOf("  dcTick(cx) {"), to = DC_SRC.indexOf("  // 머리줄 아래 칸");
+  assert.ok(from > 0 && to > from, "dcTick 경계(시작 · 다음 메서드 앞 주석)를 못 찾음");
+  return DC_SRC.slice(from, to);
+})();
+// main.js 안 상수 · 작은 도우미를 글자 그대로 가져온다(못 찾으면 시험 실패 — 조용히 가짜로 바뀌지 않게)
+const dcMainPart = (re, what) => { const m = DC_SRC.match(re); assert.ok(m, `main.js 에서 ${what} 를 못 찾음`); return m[0]; };
+const dcConsts = [
+  dcMainPart(/^const NAME = .*;$/m, "NAME"),
+  dcMainPart(/^const TF_READ_MS = .*;$/m, "TF_LINES · TF_TEXT"),
+  dcMainPart(/^const DC_OPEN_MAX_MS = .*;$/m, "DC_OPEN_MAX_MS"),
+  dcMainPart(/^const DC_READ_MAX = .*;$/m, "DC_READ_MAX · DC_TEXT_MAX"),
+  dcMainPart(/^const dcTotal = .*$/m, "dcTotal"),
+].join("\n");
+const dcMainVals = new Function("panes", `${dcConsts}\nreturn { NAME, TF_LINES, TF_TEXT, DC_READ_MAX, DC_TEXT_MAX, DC_OPEN_MAX_MS, dcTotal };`);
+const DC_NAMES = ["terminals", "selKey", "focused", "panes", "NAME", "dcStep", "spaces", "terminalMachine", "selSpan", "exec", "dcClipShape", "dcTotal", "TF_LINES", "DC_READ_MAX", "hcLimited", "DC_TEXT_MAX", "DC_BIND_MAX", "dcReadCut", "dcBind", "dcOldText", "TF_TEXT", "dcPick", "dcLonger", "RESOLVE_SCRIPT", "dcChoose", "DC_OPEN_MAX_MS"];
+const dcTickFn = new Function(...DC_NAMES, `return ({${dcTickSrc}}).dcTick;`);
+
+const DC_ADDR = "term1", DC_COLS = 80, DC_ROWS = 24, DC_CLIP = "plan.md";
+const dcLinesText = () => {   // 500 줄 · 150 줄과 450 줄에 «see plan.md here»(낱말은 열 4–10)
+  const a = [];
+  for (let i = 0; i < 500; i++) a.push(i === 150 || i === 450 ? "see plan.md here" : `filler line ${i}`);
+  return a;
+};
+
+// opts: { selRow, how, sleep: "ok" | "none" | "reject" | "bump1" | "bump2" }
+async function dcRun({ selRow, how, sleep }) {
+  const dir = mkdtempSync(join(tmpdir(), "dctick-"));
+  try {
+    writeFileSync(join(dir, "plan.md"), "synthetic\n");
+    const sel = { start: { row: selRow, col: 4 }, end: { row: selRow, col: 10 } };
+    const lines = dcLinesText(), log = [], ev = { resolveArgv: null, lines: null, opened: [], sleeps: 0 };
+    const state = { mac: true, closed: false, dcSeen: new Map(), dcOpened: new Map(), dcGen: 0, lifeOk: () => true, openTermFile: (p, on) => { ev.opened.push(p); log.push("open"); },
+      dcSt: { addr: DC_ADDR, key: TF.selKey(sel), cols: DC_COLS, since: Date.now() - 5000, fired: false } };
+    const spy = (name, fn) => (...a) => { log.push(name); return fn(...a); };
+    const M = dcMainVals(() => [{ pane: "p1", terminal: DC_ADDR, cwd: dir, scroll: { total: 500 } }]);
+    const exec = async (cmd, args) => {
+      if (cmd === "/bin/sh") { log.push("pbpaste"); return { code: 0, stdout: DC_CLIP, stderr: "" }; }
+      assert.equal(cmd, "sh", "둘째 exec 는 sh");
+      log.push("resolve"); ev.resolveArgv = args;
+      const r = spawnSync("sh", args, { encoding: "utf8" });
+      return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+    };
+    const hcLimited = async (cx, args) => {
+      log.push("hc"); ev.lines = Number(args[args.indexOf("--lines") + 1]);
+      return { code: 0, stdout: JSON.stringify({ text: lines.slice(-ev.lines).join("\n") + "\n", how }) };
+    };
+    const fn = dcTickFn(() => [{ address: DC_ADDR, selection: sel, cols: DC_COLS, rows: DC_ROWS }], TF.selKey, () => ({ terminal: DC_ADDR, pane: "p1", selection: sel, cwd: dir }), () => [{ pane: "p1", terminal: DC_ADDR, cwd: dir, scroll: { total: 500 } }],
+      M.NAME, TF.dcStep, () => [{ active: true, machine: null }], TF.terminalMachine, TF.selSpan, exec, TF.dcClipShape, M.dcTotal, M.TF_LINES, M.DC_READ_MAX, hcLimited, M.DC_TEXT_MAX, TF.DC_BIND_MAX,
+      spy("dcReadCut", TF.dcReadCut), spy("dcBind", TF.dcBind), spy("dcOldText", TF.dcOldText), M.TF_TEXT, spy("dcPick", TF.dcPick), spy("dcLonger", TF.dcLonger), TF.RESOLVE_SCRIPT, spy("dcChoose", TF.dcChoose), M.DC_OPEN_MAX_MS);
+    let task = null;
+    const inner = { timer: { after: () => ({ cancel() {} }) } };
+    if (sleep !== "none") inner.sleep = async () => {
+      ev.sleeps++; log.push("sleep");
+      if (sleep === "reject") throw new Error("sleep 실패");
+      if ((sleep === "bump1" && ev.sleeps === 1) || (sleep === "bump2" && ev.sleeps === 2)) state.dcGen++;
+    };
+    const unhandled = [], onUn = (e) => unhandled.push(e);
+    process.on("unhandledRejection", onUn);
+    try {
+      fn.call(state, { spawn: (f) => { task = f(inner); } });
+      assert.ok(task, "dcTick 이 작업을 띄우지 않음(사전 관문에서 멈춤 — 시험 장치 오류)");
+      await task;
+      await new Promise(r => setImmediate(r));
+    } finally { process.off("unhandledRejection", onUn); }
+    assert.equal(unhandled.length, 0, "처리 안 된 거부 없음");
+    return { ...ev, log, opened: ev.opened.map(p => realpathSync(p)), want: join(realpathSync(dir), "plan.md"), seq: log.filter(x => x !== "pbpaste" && x !== "hc") };
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+const dcOpenedOk = (r, msg = "선택한 합성 파일 하나를 연다") => assert.deepEqual(r.opened, [r.want], msg);
+const dcNothing = (r, msg) => { assert.deepEqual(r.opened, [], msg); assert.equal(r.resolveArgv, null, `${msg} — resolve 도 안 돈다`); };
+
+test("dcTick 동작: 묶기 길(history · 쉼 정상) — 쉼 2 · dcBind 앞뒤 · 깊게 읽기 · 순서 · 파일 연다", async () => {
+  const r = await dcRun({ selRow: 150, how: "history", sleep: "ok" });
+  assert.equal(r.lines, 352, "깊게 읽는다(--lines 352)");
+  assert.equal(r.sleeps, 2, "쉼 둘");
+  assert.deepEqual(r.seq, ["dcReadCut", "sleep", "dcBind", "sleep", "dcOldText", "dcPick", "dcLonger", "resolve", "dcChoose", "open"], "순서");
+  assert.equal(r.resolveArgv[0], "-c"); assert.equal(r.resolveArgv[1], TF.RESOLVE_SCRIPT);
+  assert.deepEqual(r.resolveArgv.slice(2, 3), ["files-plus"]);
+  assert.equal(r.resolveArgv[4], "plan.md", "cand");
+  dcOpenedOk(r);
+});
+
+test("dcTick 동작: 묶기 + 300 줄 읽기(화면 안 선택 · 보통 길) — 쉼 둘 · dcBind 앞뒤 · 연다", async () => {
+  const r = await dcRun({ selRow: 450, how: "history", sleep: "ok" });
+  assert.equal(r.lines, 300, "깊게 읽지 않는다(--lines 300)");
+  assert.equal(r.sleeps, 2, "묶으면 300 줄 읽기에서도 쉼 둘");
+  assert.deepEqual(r.seq, ["dcReadCut", "sleep", "dcBind", "sleep", "dcOldText", "dcPick", "dcLonger", "resolve", "dcChoose", "open"], "순서");
+  dcOpenedOk(r);
+  const b2 = await dcRun({ selRow: 450, how: "history", sleep: "bump2" });
+  assert.ok(b2.log.includes("dcBind") && !b2.log.includes("dcOldText"), "둘째 쉼에서 밀리면 dcBind 는 돌았고 dcOldText 는 안 돈다"); dcNothing(b2, "둘째 쉼에서 밀림");
+});
+
+test("dcTick 동작: 쉬는 사이 새 선택(dcGen)이 서면 그 뒤를 하지 않는다", async () => {
+  const ok = await dcRun({ selRow: 150, how: "history", sleep: "ok" });
+  dcOpenedOk(ok, "대조군(같은 장치 · 쉼 정상)은 연다");
+  const b1 = await dcRun({ selRow: 150, how: "history", sleep: "bump1" });
+  assert.equal(b1.sleeps, 1); assert.ok(!b1.log.includes("dcBind"), "첫 쉼에서 밀리면 dcBind 안 돈다"); dcNothing(b1, "첫 쉼에서 밀림");
+  const b2 = await dcRun({ selRow: 150, how: "history", sleep: "bump2" });
+  assert.equal(b2.sleeps, 2); assert.ok(b2.log.includes("dcBind") && !b2.log.includes("dcOldText"), "둘째 쉼에서 밀리면 dcBind 는 돌았고 dcOldText 는 안 돈다"); dcNothing(b2, "둘째 쉼에서 밀림");
+});
+
+test("dcTick 동작: cx.sleep 이 없으면 옛 300 줄 길 — 깊게 읽기 · 묶기 · dcReadCut · 쉼 없음, 옛 길로 연다", async () => {
+  const r = await dcRun({ selRow: 150, how: "history", sleep: "none" });
+  assert.equal(r.lines, 300, "--lines 300");
+  assert.equal(r.sleeps, 0);
+  assert.ok(!r.log.includes("dcBind") && !r.log.includes("dcReadCut"), "dcBind · dcReadCut 안 돈다");
+  assert.deepEqual(r.seq, ["dcOldText", "dcPick", "dcLonger", "resolve", "dcChoose", "open"]);
+  dcOpenedOk(r);
+});
+
+test("dcTick 동작: stitched + 깊게 읽기 — 쉼 하나(옛 길 앞) · 묶지 않는다 · dcReadCut 안 돈다", async () => {
+  const r = await dcRun({ selRow: 150, how: "stitched", sleep: "ok" });
+  assert.equal(r.lines, 352, "깊게 읽는다");
+  assert.equal(r.sleeps, 1, "쉼 하나");
+  assert.ok(!r.log.includes("dcBind") && !r.log.includes("dcReadCut"));
+  assert.deepEqual(r.seq, ["sleep", "dcOldText", "dcPick", "dcLonger", "resolve", "dcChoose", "open"]);
+  dcOpenedOk(r);
+  const g = await dcRun({ selRow: 150, how: "stitched", sleep: "bump1" });
+  dcNothing(g, "그 쉼에서 밀림");
+});
+
+test("dcTick 동작: stitched + 300 줄 읽기 — 쉼 없음(032f193 과 같다) · 연다", async () => {
+  const r = await dcRun({ selRow: 450, how: "stitched", sleep: "ok" });
+  assert.equal(r.lines, 300); assert.equal(r.sleeps, 0);
+  assert.ok(!r.log.includes("dcBind") && !r.log.includes("dcReadCut"));
+  dcOpenedOk(r);
+});
+
+test("dcTick 동작: 쉼이 거부되면 아무것도 열지 않고 작업은 조용히 끝난다(처리 안 된 거부 없음)", async () => {
+  const r = await dcRun({ selRow: 150, how: "history", sleep: "reject" });
+  assert.equal(r.sleeps, 1); dcNothing(r, "쉼 거부");
+  const s = await dcRun({ selRow: 150, how: "stitched", sleep: "reject" });
+  dcNothing(s, "쉼 거부(stitched 깊게 읽기)");
+});

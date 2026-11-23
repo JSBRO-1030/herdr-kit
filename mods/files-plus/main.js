@@ -404,25 +404,27 @@ export default class FilesPlus extends View {
         if (typeof clip !== "string" || clip.length > 4096) return;
         if (!dcClipShape({ clip, sel, cols })) return;   // 깊게 읽기 전 싼 검사 — 클립보드 모양이 안 맞으면 읽지 않는다(참/거짓만)
         // 묶기(dcBind): 선택 행까지 깊게 읽는다(맨 아래서 DC_READ_MAX 행 안이면). total 은 읽기 앞 · 뒤가 같을 때만 쓴다(읽는 사이 줄이 밀렸으면 모름).
+        // cx.sleep 이 없으면 쉴 수 없다 → 옛 300 줄 길 그대로(깊게 읽기 · 묶기 · 쉼 없음).
+        const canSleep = typeof cx.sleep === "function";
         const tb = dcTotal(addr);
         let n = TF_LINES;
-        if (tb !== null) { const dist = tb - Math.min(sel.start.row, sel.end.row); if (dist <= DC_READ_MAX) n = Math.min(DC_READ_MAX, Math.max(TF_LINES, dist + 2)); }
+        if (canSleep && tb !== null) { const dist = tb - Math.min(sel.start.row, sel.end.row); if (dist <= DC_READ_MAX) n = Math.min(DC_READ_MAX, Math.max(TF_LINES, dist + 2)); }
         const r = await hcLimited(cx, ["read", addr, "--lines", String(n), "--json"]);
         if (gen !== this.dcGen) return;
         if (!r || r.code !== 0) return;
         const rd = JSON.parse(r.stdout);
         let full = rd?.text;
         if (typeof full !== "string") return;
-        // [주의] 글자(UTF-16) 수로 자른다(앞을 버림 → cut). 4 MiB 를 넘는 읽기는 자른 뒤에도 dcBind 의 DC_BIND_MAX 를 넘어 묶이지 않는다(옛 길). 터미널 글자는 믿을 수 없는 입력(이름은 위치 인자로만 sh 에 넘긴다).
-        const cut = full.length > DC_TEXT_MAX || (full.length <= DC_BIND_MAX && dcReadCut(full, n));   // 줄 수 제한(--lines n)에 걸린 읽기도 앞이 잘렸을 수 있다 → 아래 붙임만(반드시 slice 앞의 원래 글로 센다). DC_BIND_MAX 를 넘는 글은 dcBind 가 어차피 null 이라 줄 수를 세지 않는다
-        if (cut) full = full.slice(-DC_TEXT_MAX);
         const total = tb !== null && tb === dcTotal(addr) ? tb : null;
-        // 읽기 방식(how)이 "history" 일 때만 묶는다 — stitched(화면과 기록을 이어 붙인 읽기) · 모르는 값은 줄 ↔ 행 대응을 믿지 않는다 → 묶지 않는다.
-        // [주의] Herdr 는 한 번에 약 0.5 초 넘게 도는 JS 조각을 소리 없이 끊는다(VM 실측 450–600 ms · 모드는 산다) → 읽기·파싱 / 묶기 / 옛 길을 다른 조각으로 나눈다(묶기가 도는 때만 쉰다) · 쉬는 사이 새 선택이 서면 버린다(gen). 앞에서 잡은 sel · cols · rows · addr · cwd · full 은 값이라 낡지 않는다.
-        const binds = total !== null && rd?.how === "history";
+        // 읽기 방식(how)이 "history" 일 때만 묶는다 — stitched(화면과 기록을 이어 붙인 읽기) · 모르는 값은 줄 ↔ 행 대응을 믿지 않는다 → 묶지 않는다. 쉴 수 없으면(canSleep) 묶지도 않는다.
+        const binds = canSleep && total !== null && rd?.how === "history";
+        // [주의] 글자(UTF-16) 수로 자른다(앞을 버림 → cut). 4 MiB 를 넘는 읽기는 자른 뒤에도 dcBind 의 DC_BIND_MAX 를 넘어 묶이지 않는다(옛 길). 터미널 글자는 믿을 수 없는 입력(이름은 위치 인자로만 sh 에 넘긴다).
+        const cut = full.length > DC_TEXT_MAX || (binds && full.length <= DC_BIND_MAX && dcReadCut(full, n));   // 줄 수 제한(--lines n)에 걸린 읽기도 앞이 잘렸을 수 있다 → 아래 붙임만(반드시 slice 앞의 원래 글로 센다). dcReadCut 은 묶을 때만 · DC_BIND_MAX 를 넘는 글은 dcBind 가 어차피 null 이라 줄 수를 세지 않는다
+        if (cut) full = full.slice(-DC_TEXT_MAX);
+        // [주의] Herdr 는 한 번에 약 0.5 초 넘게 도는 JS 조각을 소리 없이 끊는다(VM 실측 450–600 ms · 모드는 산다) → 읽기·파싱 / 묶기 / 옛 길을 다른 조각으로 나눈다: 묶기 앞 · 묶기 뒤에서 쉬고, 묶지 않아도 깊게 읽었으면(n !== TF_LINES) 옛 길 앞에서 쉰다. 300 줄 읽기를 묶지 않는 길은 032f193 과 같다(쉼 없음). 쉬는 사이 새 선택이 서면 버린다(gen). 앞에서 잡은 sel · cols · rows · addr · cwd · full 은 값이라 낡지 않는다.
         if (binds) { await cx.sleep(0); if (gen !== this.dcGen) return; }
-        const bd = total === null || rd?.how !== "history" ? null : dcBind({ sel, cols, rows, text: full, clip, total, cut });
-        if (binds) { await cx.sleep(0); if (gen !== this.dcGen) return; }
+        const bd = binds ? dcBind({ sel, cols, rows, text: full, clip, total, cut }) : null;
+        if (binds || n !== TF_LINES) { await cx.sleep(0); if (gen !== this.dcGen) return; }   // n !== TF_LINES 면 canSleep 이다
         // 묶이지 않는 길의 글: 깊게 안 읽었으면(n === TF_LINES) 읽은 그대로 끝 TF_TEXT 글자(032f193 과 같다) · 깊게 읽었으면 «마지막 TF_LINES + rows 줄» → 끝 TF_TEXT 글자. 끝 빈 행이 잘려 화면 줄이 적으면(예: Ctrl+L 뒤) 032f193 보다 최대 rows 줄 더 오래된 줄까지 본다(바뀐 동작 · 연 것은 선택한 이름).
         const oldText = dcOldText(full, n === TF_LINES ? null : TF_LINES + (Number.isInteger(rows) && rows > 0 ? rows : 0), TF_TEXT);
         const cand = dcPick({ clip, sel, cols, text: oldText, bd });
