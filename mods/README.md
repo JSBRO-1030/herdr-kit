@@ -2,7 +2,7 @@
 
 > 세트 전체 안내는 저장소 맨 위 `README.md`.
 
-원격 머신의 파일을 Herdr 앱(Mac)에서 보고 주고받게 하는 herdr 앱 mod 입니다. 지금은 **files-plus(파일+)** 하나가 들어 있습니다.
+원격 머신의 파일을 Herdr 앱(Mac)에서 보고 주고받게 하는 herdr 앱 mod 입니다. **files-plus(파일+)** 와 **panel-tabs(패널 탭 줄)** 가 들어 있습니다.
 
 ## files-plus 가 하는 일
 
@@ -132,6 +132,32 @@ sh ~/herdr-option/mods/install-mac.sh --show-files    # 되돌린다
 
 늘 띄우는 법(손으로), 손 점검표, 옮기는 방식은 [`files-plus/RECIPE.md`](files-plus/RECIPE.md) 에 있습니다.
 
+## panel-tabs (패널 탭 줄, M1)
+
+오른쪽 패널 스택(`panel-body`)의 머리줄에 **칩**(패널 이름 단추)을 한 줄로 보여 줍니다. 칩을 누르면 그 패널로 바뀝니다. 폭이 좁으면 **아이콘만** 남습니다. 아직 닫기 · `+` · 옮기기는 없습니다(M1).
+
+```sh
+sh ~/herdr-option/mods/install-mac.sh --panel-tabs [레이아웃]     # 깔고 header 를 단다 · 여러 번 돌려도 같다
+sh ~/herdr-option/mods/install-mac.sh --remove-panel-tabs [레이아웃]   # header 만 뺀다
+```
+
+- **Herdr 앱 0.1.17 이상**이 필요합니다(header 꼴을 0.1.17 에서 확인). 낮거나 버전을 못 읽으면 아무것도 바꾸기 전에 멈춥니다.
+- `--panel-tabs` 는 기본 설치(files-plus 깔기 · 블록 · 탭바 «Files+»)에 더해 `mods/panel-tabs` 를 같은 절차(숨긴 폴더 `check` → 사본 `.panel-tabs-backup/<시각>-<PID>/` → 바꿔 끼우기)로 깔고, 레이아웃의 `panel-body` 에 아래 header 를 더하거나 고칩니다. files-plus 블록과 header 는 **한 번에 계산해 한 번만 저장**합니다(사본 하나).
+  ```json
+  "header": { "content": { "mod": "panel-tabs", "props": { "stack": "panel-body", "hideFiles": false } }, "height": 32 }
+  ```
+- 칩은 탭바의 Files / Changes 보임 여부를 따릅니다: `hideFiles` = 이번 실행 뒤 탭바 Files 단추가 숨겨 있나. `--hide-files` / `--show-files` 변환 결과를 같은 패처로 미리 읽고, 변환을 거절하면 지금 상태를 유지합니다. 둘 다 없으면 `auto-tabs` 의 지금 상태이며, `auto-tabs` 가 없으면 옵션에 관계없이 false 입니다. 나중에 `--hide-files` / `--show-files` 만 돌리면 `hideFiles` 는 그대로이니, 바꿨으면 `--panel-tabs` 를 다시 돌립니다.
+- 이미 panel-tabs 의 header 가 있으면 `hideFiles` · `stack` · `height` 만 다를 때 고치고 아니면 그대로 둡니다. **panel-tabs 가 아닌 header 가 이미 있으면** 아무것도 바꾸기 전에 멈춥니다(덮어쓰지 않음).
+- `--panel-tabs` / `--remove-panel-tabs` 실행 전 떠 있는 대상 레이아웃에 `status` 오류가 이미 있으면 메시지를 출력하고 아무것도 바꾸기 전에 거절합니다(파일을 먼저 고친 뒤 재실행). 쓴 뒤 그 레이아웃이 떠 있으면 `herdr-app status` 의 `errors` 에 `layouts/<이름>.json was not applied` 가 생기는지 2초 봅니다. 생기면 사본으로 되돌리고(블록 · header 모두) 그 메시지와 함께 실패합니다. 안 떠 있는 레이아웃은 Herdr 가 파일을 보지 않아 검사할 수 없습니다 — 띄운 뒤 `herdr-app status` 를 봅니다. `status` 를 못 읽으면 «확인 못 함» 만 알립니다.
+- `--remove-panel-tabs` 는 `panel-body` 의 header 가 panel-tabs 것일 때만 뺍니다(사본 + 통째로 바꿔 끼우기). mod 복사 · `auto-tabs` · 패널 열기는 하지 않고, `mods/panel-tabs` 폴더는 그대로 둡니다(`place: none` 이라 해가 없음 · 지우려면 폴더를 손으로). header 가 없으면 «없음, 바뀐 것 없음» 으로 끝납니다(종료 0). `--panel-tabs` · `--hide-files` · `--show-files` 와는 함께 못 씁니다(종료 2).
+- `mods/panel-tabs` 가 심볼릭 링크이거나 그 안에 심볼릭 링크 · 하드링크 파일이 있으면 아무것도 바꾸기 전에 거절합니다. 게시는 `mod.json` 을 먼저, `main.js` 를 마지막에 합니다.
+- 깐 뒤에는 **앱을 한 번 다시 띄우기**를 권합니다(아래 첫 한계).
+
+알려진 한계:
+
+- **칩을 눌러도 패널이 안 바뀔 때가 있습니다(원인 미확인).** 오래 켜 둔 앱에 설치 · 지우기 · 레이아웃 오류 · mod 다시 읽기를 여러 번 겪은 뒤 시험 VM 에서 두 번 보였습니다. 그 상태에서도 `herdr-app do layout.select '{"stack":"panel-body","child":"changes"}'` 로는 바뀌었고(탭바 단추는 못 봄), **앱을 다시 띄우면 풀립니다**. 다시 띄운 뒤 같은 순서를 되풀이해서는 재현되지 않았습니다.
+- `--panel-tabs` 가 header 를 저장한 뒤 `auto-tabs` 단계 도중 신호(Ctrl-C · 창 닫힘 · `kill`)로 끊기면 header 의 `hideFiles` 가 탭바 Files 상태와 어긋난 채 남을 수 있습니다(`auto-tabs` 가 실패로 끝날 때는 되돌립니다). `--panel-tabs` 를 다시 돌리면 맞춰집니다.
+
 ## 상태 (2026-11-16)
 
 - 폴더 · 여러 항목 올리기(`tree.js` · 고르기 창 폴더 선택)를 코드에 넣었습니다(2026-11-16). 미리보기 창 크기 조절 · 글자 크기도 같은 날 넣었습니다. node 시험: `files-plus.test.mjs` 56/56 · `state.test.mjs` 56/56 = 112/112 통과(Mac) · `herdr-app check` 통과(앱 0.1.16) — macOS 시험 VM(Tart · 앱 0.1.16 · 원격 hc 경로)에서 실제 앱 시험 통과: 폴더 끌어 놓기 · 같은 이름 «(1)» · 파일+폴더 함께 · 고르기 창 · 창 크기 끌기 · 글자 크기. 렌더된 마크다운 안의 코드 블록은 글자 크기를 따라 커지지 않는다(호스트 렌더러).
@@ -158,11 +184,13 @@ sh ~/herdr-option/mods/install-mac.sh --show-files    # 되돌린다
 ## 시험 (원격 머신에서)
 
 ```sh
-node --test tests/files-plus.test.mjs tests/state.test.mjs tests/termfiles.test.mjs
+node --test tests/files-plus.test.mjs tests/state.test.mjs tests/termfiles.test.mjs tests/panel-tabs.test.mjs
+sh tests/install-panel-tabs.test.sh   # stub herdr-app 사용 · 실제 앱에 손대지 않음
 ```
 
 - `files-plus.test.mjs`: mod 가 쓰는 `kinds.js` · `transfer.js` 를 그대로 불러, 진짜 `hc exec` 로 올리기 · 내려받기를 돌립니다. 크기 경계, 이상한 이름, 덮어쓰지 않기, 동시 전송, 취소, 격리 속성을 봅니다.
 - `state.test.mjs`: 공통 계약 `state.js`(요청함 · 요약 · 막대 · 속도 · 기록 묶음 · throttle · owner 복원)를 봅니다.
+- `panel-tabs.test.mjs`: panel-tabs 의 순수 모델(`model.js`)을 합성 데이터로 봅니다.
 - `termfiles.test.mjs`: `termfiles.js` 순수 함수(파일 이름 후보 · 줄 잇기 · 풀기/찾기 스크립트 · 더블클릭 `cellWidth` · `selSpan` · `dcStep` · `dcBind`(`DC_BIND_MAX` 글 상한 · 칸/행 불확실 · 묶음 위험 줄 · 같은 열 가드) · `dcReadCut` · `dcClipShape` · `dcOldText` · `dcPick` · `dcLonger` · `dcChoose`)를 합성 경로로 봅니다.
 - 결과(2026-11-15, Mac): `state.test.mjs` 32/32 통과 · `files-plus.test.mjs` 12/13 통과(실패 1 = `/dev/shm` 을 쓰는 리눅스 전용 시험이라 macOS 에서는 `mkdtemp` 가 못 만든다).
 - 화면 검사: `HAPP=<준비한 폴더> sh tests/linux-app-check.sh files-plus` 로 리눅스 앱의 `herdr-app check` 를 격리해 돌립니다. 준비물은 그 파일 머리에 적었습니다.
@@ -177,9 +205,10 @@ files-plus/          mod 본체 + RECIPE.md
   state.js             패널 ↔ 팝업 공통 계약(요청함 · 요약 · 기록 · throttle), herdr 를 import 하지 않음
   kinds.js · transfer.js  종류 판별 · 조각 전송
   *.svg                아이콘
+panel-tabs/          mod 본체(패널 탭 줄: main.js · model.js · mod.json)
 docs/                popups-design.md(팝업 개편 설계)
 tests/               node 시험(files-plus · state · fsops) · 격리 check 스크립트
-install-mac.sh       Mac 에 깔고 화면(오른쪽 패널 · 탭바 «Files+»)에 띄운다
+install-mac.sh       Mac 에 깔고 화면(오른쪽 패널 · 탭바 «Files+» · 선택 --panel-tabs)에 띄운다
 ```
 
 ## 라이선스

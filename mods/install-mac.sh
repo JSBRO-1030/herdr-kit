@@ -5,30 +5,49 @@
 #   3. 탭바 mod `auto-tabs`(tabs 복제본)가 있으면 «Files+» 패널 단추를 더한다 · check 가 떨어지면 되돌린다
 #   4. 그 레이아웃이 지금 떠 있으면 패널을 files-plus 로 연다
 #   (선택) --hide-files: auto-tabs 에서 기본 Files 단추를 뺀다(블록은 남겨 되돌릴 수 있다) · --show-files: 되돌린다
+#   (선택) --panel-tabs: 위 일에 더해 mods/panel-tabs(패널 탭 줄)를 같은 방식으로 깔고(check · 사본 · 바꿔 끼우기 · 사본 폴더 .panel-tabs-backup/<시각>-<PID>) panel-body 스택에 header 를 더하거나 고친다(레이아웃은 블록과 함께 한 번만 저장).
+#     header = {content:{mod:panel-tabs, props:{stack:panel-body, hideFiles:<bool>}}, height:32} · hideFiles = 같은 패처가 예측한 이번 실행 뒤 Files 상태(숨김=true · 보임=false · 변환 거절이면 현재 상태 · auto-tabs 없으면 false)
+#     panel-body 에 panel-tabs 가 아닌 header 가 이미 있으면 아무것도 바꾸기 전에 거절한다 · Herdr 앱 0.1.17 이상만(header 꼴을 0.1.17 에서 확인) · 그 레이아웃이 떠 있으면 쓴 뒤 `herdr-app status` 의 errors 에 layouts/<이름>.json 오류가 생기는지 2초 본다(생기면 사본으로 되돌리고 실패 · 안 떠 있으면 검사 못 함을 알림).
+#   (선택) --remove-panel-tabs: panel-body 의 header 가 panel-tabs 것일 때만 뺀다(사본 + 통째로 바꿔 끼우기). mod 를 복사하지 않고 auto-tabs · 패널 열기도 안 한다 · mods/panel-tabs 폴더는 그대로 둔다(place:none 이라 해가 없다) · --panel-tabs · --hide-files · --show-files 와 함께 못 쓴다.
 # 고치는 파일마다 먼저 사본을 둔다: layouts/<이름>.json.bak-files-plus-<시각>-<PID>(레이아웃 링크가 있는 폴더) · .main.js.bak-files-plus-<시각>-<PID>(실제 main.js 가 있는 폴더 = 보통 mods/auto-tabs/, main.js 가 링크면 링크가 가리키는 폴더)
 # [주의] 앱이 mod 폴더의 낯선 파일을 읽는지 모른다 → 링크 대상 폴더(다른 체크아웃일 수 있음)에도 사본을 두는 대신 «실제로 쓰는 파일 옆» 에 둔다.
 # 앱이 싣는 레이아웃(main · terminals · win98)은 고치지 않는다 — 앱이 다음 시작에 되돌린다. 복제본 이름을 준다.
 # 심볼릭 링크: mods/files-plus 가 링크면 다른 체크아웃을 덮어쓰게 되므로 거절한다 · 레이아웃 파일·auto-tabs/main.js 가 링크면 링크가 가리키는 실제 파일에 쓴다(링크는 그대로).
 # 파일 모드(0644 등)와 줄 끝(CRLF)은 그대로 둔다. 레이아웃 JSON 은 같은 폴더의 임시 파일 → os.replace 로 통째 바꿔 끼운다(쓰는 중 죽어도 원본 또는 새 파일 하나만 남는다 · 링크 대상 파일 모드/소유자 유지). 하드링크(link 수>1)면 inode 를 지키려고 제자리로 덮어쓴다. 들여쓰기 꼴(공백 수 · 탭)·키 순서·끝 줄바꿈을 지킨다.
-# 쓰는 법: sh install-mac.sh [레이아웃 이름] [--hide-files | --show-files]   (옵션은 이름 앞뒤 아무 데나 · 앱 폴더를 바꾸려면 HERDR_APP_HOME=<폴더>)
+# 쓰는 법: sh install-mac.sh [레이아웃 이름] [--hide-files | --show-files] [--panel-tabs]  또는  sh install-mac.sh [레이아웃 이름] --remove-panel-tabs   (옵션은 이름 앞뒤 아무 데나 · 앱 폴더를 바꾸려면 HERDR_APP_HOME=<폴더>)
 set -eu
 
 usage() {
-  echo "쓰는 법: sh install-mac.sh [레이아웃 이름] [--hide-files | --show-files]" >&2
+  echo "쓰는 법: sh install-mac.sh [레이아웃 이름] [--hide-files | --show-files] [--panel-tabs]" >&2
+  echo "       sh install-mac.sh [레이아웃 이름] --remove-panel-tabs   (다른 옵션과 함께 못 씀)" >&2
   exit 2
 }
 LAYOUT_ARG=
 FILES_MODE=
+PANEL_TABS=
+REMOVE_PT=
 for arg in "$@"; do
   case $arg in
     --hide-files|--show-files)
       [ -z "$FILES_MODE" ] || [ "$FILES_MODE" = "${arg#--}" ] || usage
       FILES_MODE=${arg#--} ;;
+    --panel-tabs) PANEL_TABS=1 ;;
+    --remove-panel-tabs) REMOVE_PT=1 ;;
     -*) echo "모르는 옵션: $arg" >&2; usage ;;
     *) [ -z "$LAYOUT_ARG" ] || usage
        LAYOUT_ARG=$arg ;;
   esac
 done
+# 제거는 다른 옵션과 함께 못 쓴다(깔기 · Files 단추 일을 섞지 않는다).
+[ -z "$REMOVE_PT" ] || [ -z "$PANEL_TABS$FILES_MODE" ] || { echo "--remove-panel-tabs 는 --panel-tabs · --hide-files · --show-files 와 함께 쓸 수 없다" >&2; usage; }
+# --panel-tabs 가 쓸 저장소 mod 폴더: 깔기 전에(아무것도 바꾸기 전에) 있는지 본다.
+if [ -n "$PANEL_TABS" ]; then
+  _pt_src=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/panel-tabs
+  [ -f "$_pt_src/mod.json" ] && [ -f "$_pt_src/main.js" ] || { echo "저장소에 mods/panel-tabs(mod.json · main.js)가 없다: $_pt_src — 저장소를 새로 받는다. 손댄 것 없음." >&2; exit 1; }
+fi
+PT_MODE=
+[ -z "$PANEL_TABS" ] || PT_MODE=install
+[ -z "$REMOVE_PT" ] || PT_MODE=remove
 
 APP=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
 REPO=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -43,13 +62,27 @@ case $HERDR_APP in *[!A-Za-z0-9_./:@%+=-]*) HERDR_APP_Q="'$(printf %s "$HERDR_AP
 command -v python3 >/dev/null 2>&1 || { echo "python3 이 없다" >&2; exit 1; }
 [ -d "$APP" ] || { echo "앱 폴더가 없다: $APP (앱을 한 번 띄운 뒤 다시)" >&2; exit 1; }
 
+# --panel-tabs: header 꼴은 Herdr 0.1.17 에서 확인했다 → 그보다 낮거나 버전을 못 읽으면 아무것도 하기 전에 거절한다(짐작하지 않는다).
+if [ -n "$PANEL_TABS" ]; then
+  PT_VER_RAW=$("$HERDR_APP" --version 2>/dev/null) || PT_VER_RAW=
+  PT_VER_OK=$(printf %s "$PT_VER_RAW" | python3 -c 'import re, sys
+m = re.search(r"(\d+)\.(\d+)\.(\d+)", sys.stdin.read())
+print("?" if not m else ("ok" if tuple(map(int, m.groups())) >= (0, 1, 17) else "old"))' 2>/dev/null) || PT_VER_OK="?"
+  case $PT_VER_OK in
+    ok) ;;
+    old) echo "herdr-app 이 너무 낮다($PT_VER_RAW) — --panel-tabs 는 0.1.17 이상만 확인했다. 앱을 올린 뒤 다시. 손댄 것 없음." >&2; exit 1 ;;
+    *) echo "herdr-app 버전을 읽을 수 없다('$HERDR_APP --version' → «${PT_VER_RAW}») — --panel-tabs 는 0.1.17 이상만 확인했다. 손댄 것 없음." >&2; exit 1 ;;
+  esac
+fi
+
 LOCK="$APP/.files-plus-install.lock"
 STAGE=
 TABS_STAGE=
+PT_STAGE=
 LOCKED=
 # [주의] 잠금·임시 폴더는 어떤 경로로 끝나도(오류 · INT · TERM) 치운다. 잠금 플래그(uchg)·읽기 전용이 남은 임시 폴더도 풀고 지운다. 내가 잡은 잠금만 푼다.
 cleanup() {
-  for _d in "$STAGE" "$TABS_STAGE"; do
+  for _d in "$STAGE" "$TABS_STAGE" "$PT_STAGE"; do
     [ -z "$_d" ] || { chflags -R nouchg,noschg "$_d" 2>/dev/null; chmod -R u+rwX "$_d" 2>/dev/null; rm -r -f "$_d" 2>/dev/null; } || true
   done
   [ -z "$LOCKED" ] || rmdir "$LOCK" 2>/dev/null || true
@@ -74,13 +107,18 @@ late_fail() {
 }
 
 # mods/files-plus 가 심볼릭 링크면(다른 체크아웃을 가리킴) 파일을 바꿔 끼우다 그쪽을 덮어쓴다 → 아무것도 하기 전에 거절한다.
-if [ -L "$APP/mods/files-plus" ]; then
+if [ -z "$REMOVE_PT" ] && [ -L "$APP/mods/files-plus" ]; then
   echo "mods/files-plus 가 심볼릭 링크다($APP/mods/files-plus) — 링크가 가리키는 폴더를 덮어쓰지 않으려고 멈췄다. 링크를 치우고(또는 그 폴더를 직접 갱신하고) 다시 돌린다. 손댄 것 없음." >&2
+  exit 1
+fi
+# panel-tabs 도 같은 규칙: 링크면 다른 체크아웃을 덮어쓰게 된다.
+if [ -n "$PANEL_TABS" ] && [ -L "$APP/mods/panel-tabs" ]; then
+  echo "mods/panel-tabs 가 심볼릭 링크다($APP/mods/panel-tabs) — 링크가 가리키는 폴더를 덮어쓰지 않으려고 멈췄다. 링크를 치우고(또는 그 폴더를 직접 갱신하고) 다시 돌린다. 손댄 것 없음." >&2
   exit 1
 fi
 
 # auto-tabs 안에 끊어진 심볼릭 링크가 있으면 3단계 cp -RL 이 실패한다(앞 단계가 이미 바꾼 뒤) → 아무것도 하기 전에 거절한다.
-if [ -f "$APP/mods/auto-tabs/main.js" ]; then
+if [ -z "$REMOVE_PT" ] && [ -f "$APP/mods/auto-tabs/main.js" ]; then
   DANGLING=$(find -L "$APP/mods/auto-tabs" -type l 2>/dev/null)
   if [ -n "$DANGLING" ]; then
     echo "auto-tabs 안에 끊어진 심볼릭 링크가 있다(복사할 수 없음) — 링크를 치우거나 고치고 다시 돌린다. 바뀐 것 없음:" >&2
@@ -89,443 +127,15 @@ if [ -f "$APP/mods/auto-tabs/main.js" ]; then
   fi
 fi
 
-# 레이아웃: 인자 > shared.json 의 지금 레이아웃 > main. 앱 원본은 먼저 거른다.
-ACTIVE=$(python3 -c 'import json, sys
-try: print(json.load(open(sys.argv[1], encoding="utf-8")).get("layout") or "")
-except Exception: print("")' "$APP/shared.json")
-LAYOUT=${LAYOUT_ARG:-${ACTIVE:-main}}
-python3 - "$APP" "$LAYOUT" "$HERDR_APP_Q" "$FILES_MODE" "$REPO/files-plus" <<'PY'
-import filecmp, json, os, re, stat, sys, time
-
-app, name, herdr, files_mode, repo = sys.argv[1:6]
-if not name or name in {".", ".."} or os.path.basename(name) != name:
-    sys.exit("레이아웃 이름에 경로를 쓸 수 없다")
-try:
-    with open(os.path.join(app, "installed.json"), encoding="utf-8") as f:
-        installed = json.load(f)
-    if not isinstance(installed, dict):
-        raise ValueError("JSON 객체가 아니다")
-except Exception:
-    sys.exit("installed.json 을 읽을 수 없거나 JSON 객체가 아니다 — 설치를 멈췄다")
-if name in {"main", "terminals", "win98"} or f"layout:{name}" in installed:
-    sys.exit(f"«{name}» 는 앱이 싣는 레이아웃이라 고쳐도 앱이 되돌린다. 먼저 복제한다:\n"
-             f"  {herdr} do layout.clone '{{\"name\":\"{name}\",\"as\":\"my-{name}\"}}'\n"
-             f"  sh install-mac.sh my-{name}")
-
-# 폴더 점검 · 남은 임시 파일 청소(아래 3곳이 같은 꼴을 쓴다). [주의] 청소는 이 설치기의 임시 이름 꼴(.<8자>.files-plus-tmp)과 정확히 같은 «일반 파일»(링크 아님 · lstat) · 내 소유 · 10분 넘은 것만 지운다.
-IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0) | getattr(stat, "UF_APPEND", 0) | getattr(stat, "SF_APPEND", 0)
-TMP_RE = re.compile(r"^\.[a-z0-9_]{8}\.files-plus-tmp$")
-def unwritable(d):
-    try:
-        if getattr(os.stat(d), "st_flags", 0) & IMMUTABLE:
-            return "잠금 플래그(uchg 등)"
-        if not os.access(d, os.W_OK | os.X_OK):
-            return "쓰기 권한 없음"
-    except OSError as exc:
-        return str(exc)
-    return None
-def sweep(d):
-    try:
-        names = os.listdir(d)
-    except OSError:
-        return
-    for n in names:
-        if not TMP_RE.match(n):
-            continue
-        fp = os.path.join(d, n)
-        try:
-            st = os.lstat(fp)
-            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and time.time() - st.st_mtime > 600:
-                os.unlink(fp)
-        except OSError:
-            pass
-path = os.path.join(app, "layouts", name + ".json")
-if not os.path.isfile(path):
-    sys.exit(f"레이아웃 파일이 없다: {path}")
-# 아무것도 바꾸기 전에 거른다: 단추(togglePanel)와 자동 열기(layout.select)는 블록 id «files-plus» 로 찾는다.
-try:
-    with open(path, encoding="utf-8") as f:
-        layout = json.load(f)
-except Exception as exc:
-    sys.exit(f"레이아웃 파일을 읽을 수 없다: {path}: {exc}")
-
-def find(node, id_):
-    if isinstance(node, dict):
-        if node.get("id") == id_:
-            return node
-        for child in node.get("children") or []:
-            hit = find(child, id_)
-            if hit:
-                return hit
-    return None
-
-body = find(layout, "panel-body")
-if isinstance(body, dict) and body.get("type") == "stack":
-    if body.get("children") is not None and not isinstance(body.get("children"), list):
-        sys.exit(f"레이아웃 {name}: panel-body 의 children 이 목록이 아니다 — 손으로 고친다. 손댄 것 없음.")
-    kids = [c for c in body.get("children") or [] if isinstance(c, dict)]
-    mods = [c for c in kids if (c.get("content") or {}).get("mod") == "files-plus"]
-    if mods and not any(c.get("id") == "files-plus" for c in mods):
-        bad = mods[0].get("id")
-        sys.exit(f"레이아웃 {name}: files-plus mod 블록의 id 가 «{bad}» 다 — 탭바 단추와 자동 열기는 id «files-plus» 로 찾아 동작하지 않는다.\n"
-                 f"  {path} 에서 그 블록의 id 를 «files-plus» 로 바꾼 뒤 다시 돌린다. 손댄 것 없음.")
-    need_layout = not any(c.get("id") == "files-plus" for c in mods)
-else:
-    need_layout = False
-# 점검: 쓸 폴더 · 고칠 «파일» 을 아무것도 바꾸기 전에 본다(traceback 없이). 폴더 = 레이아웃 링크 폴더 · 실제 파일 폴더 · 실제 main.js 폴더 · 바뀔 mods/files-plus 파일의 폴더. 파일 = 레이아웃 실제 파일 · (단추를 더해야 하면) main.js 실제 파일 · 바뀔 mods/files-plus 파일(잠금 플래그만 — 바꿔 끼우기는 읽기 전용 파일도 된다).
-def file_block(p, need_w=True):
-    try:
-        if getattr(os.stat(p), "st_flags", 0) & IMMUTABLE:
-            return "잠금 플래그(uchg 등)"
-        if need_w and not os.access(p, os.W_OK):
-            return "쓰기 권한 없음(읽기 전용 · 소유자)"
-    except OSError as exc:
-        return str(exc)
-    return None
-def repo_files(root):
-    # .cache 는 설치기가 만들지도 건드리지도 않는다 → 점검 · 청소 밖
-    for base, dirs, names in os.walk(root):
-        if base == root and ".cache" in dirs:
-            dirs.remove(".cache")
-        for n in names:
-            if base != root or n != ".cache":
-                yield os.path.relpath(os.path.join(base, n), root)
-def nearest_dir(d):
-    while d and not os.path.isdir(d):
-        up = os.path.dirname(d)
-        if up == d:
-            break
-        d = up
-    return d
-live = os.path.join(app, "mods", "files-plus")
-changed = [rel for rel in repo_files(repo)
-           if not os.path.isfile(os.path.join(live, rel))
-           or not filecmp.cmp(os.path.join(repo, rel), os.path.join(live, rel), shallow=False)]
-checks, file_checks = [], []
-if changed:
-    checks.append(nearest_dir(os.path.dirname(live)))
-    for rel in changed:
-        dst = os.path.join(live, rel)
-        checks.append(nearest_dir(os.path.dirname(dst)))
-        if os.path.isfile(dst):
-            file_checks.append((dst, False))
-if need_layout:
-    checks += [os.path.dirname(path), os.path.dirname(os.path.realpath(path))]
-    file_checks.append((os.path.realpath(path), True))
-sweeps = [os.path.dirname(path), os.path.dirname(os.path.realpath(path))]
-tabs_js = os.path.join(app, "mods", "auto-tabs", "main.js")
-if os.path.isfile(tabs_js):
-    tabs_dir = os.path.dirname(os.path.realpath(tabs_js))
-    sweeps.append(tabs_dir)
-    try:
-        with open(tabs_js, encoding="utf-8", errors="replace") as f:
-            has_btn = 'panelButton("files-plus"' in f.read()
-    except OSError:
-        has_btn = False
-    if files_mode or not has_btn:
-        checks.append(tabs_dir)
-    if not has_btn:
-        file_checks.append((os.path.realpath(tabs_js), True))   # 단추를 더하면 확실히 쓴다(--hide/--show 만이면 쓸지 모르니 쓰는 때 다시 본다)
-for d in dict.fromkeys(checks):
-    why = unwritable(d)
-    if why:
-        sys.exit(f"쓸 수 없다: {d} ({why}) · 바뀐 것 없음")
-for fp, need_w in dict.fromkeys(file_checks):
-    why = file_block(fp, need_w)
-    if why:
-        sys.exit(f"쓸 수 없다: {fp} ({why}) · 바뀐 것 없음")
-for d in dict.fromkeys(sweeps):
-    if unwritable(d) is None:
-        sweep(d)
-PY
-
-# 1. 숨긴 폴더에서 check 한 뒤 파일마다 바꿔 끼운다. .cache 는 그대로 둔다.
-STAGE=$(mktemp -d "$APP/.files-plus-stage.XXXXXX")
-cp -R "$REPO/files-plus/." "$STAGE/"
-if ! "$HERDR_APP" check "$STAGE"; then
-  echo "files-plus: check 가 떨어져 손대지 않았다" >&2
-  exit 1
-fi
-FP_MARK1="$STAGE/.changed"
-FP_MARK2="$STAGE/.layout-changed"
-export FP_MARK1 FP_MARK2
-python3 - "$APP" "$STAGE" "$TS-$$" "$REPO/files-plus" <<'PY'
-import filecmp, os, re, shutil, signal, stat, sys, tempfile, time
-
-app, stage, stamp, repo = sys.argv[1:5]
-live = os.path.join(app, "mods", "files-plus")
-backup = os.path.join(app, ".files-plus-backup", stamp)
-
-# 폴더 점검 · 남은 임시 파일 청소(아래 3곳이 같은 꼴을 쓴다). [주의] 청소는 이 설치기의 임시 이름 꼴(.<8자>.files-plus-tmp)과 정확히 같은 «일반 파일»(링크 아님 · lstat) · 내 소유 · 10분 넘은 것만 지운다.
-IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0) | getattr(stat, "UF_APPEND", 0) | getattr(stat, "SF_APPEND", 0)
-TMP_RE = re.compile(r"^\.[a-z0-9_]{8}\.files-plus-tmp$")
-def unwritable(d):
-    try:
-        if getattr(os.stat(d), "st_flags", 0) & IMMUTABLE:
-            return "잠금 플래그(uchg 등)"
-        if not os.access(d, os.W_OK | os.X_OK):
-            return "쓰기 권한 없음"
-    except OSError as exc:
-        return str(exc)
-    return None
-def sweep(d):
-    try:
-        names = os.listdir(d)
-    except OSError:
-        return
-    for n in names:
-        if not TMP_RE.match(n):
-            continue
-        fp = os.path.join(d, n)
-        try:
-            st = os.lstat(fp)
-            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and time.time() - st.st_mtime > 600:
-                os.unlink(fp)
-        except OSError:
-            pass
-
-def files(root):
-    for base, dirs, names in os.walk(root):
-        if base == root and ".cache" in dirs:
-            dirs.remove(".cache")
-        for name in names:
-            if base != root or name != ".cache":
-                yield os.path.relpath(os.path.join(base, name), root)
-
-def publish(src, dst):
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".", suffix=".files-plus-tmp")
-    os.close(fd)
-    try:
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-changed = [rel for rel in files(repo)
-           if not os.path.isfile(os.path.join(live, rel))
-           or not filecmp.cmp(os.path.join(stage, rel), os.path.join(live, rel), shallow=False)]
-if not changed:
-    sys.exit(0)
-# 바뀔 파일이 들어갈 폴더만 본다. .cache 와 설치기가 만들지 않은 폴더는 점검 · 청소 밖(그 안이 쓰기 불가여도 설치는 된다).
-def nearest_dir(d):
-    while d and not os.path.isdir(d):
-        up = os.path.dirname(d)
-        if up == d:
-            break
-        d = up
-    return d
-need_dirs = [nearest_dir(os.path.dirname(live))] + [nearest_dir(os.path.dirname(os.path.join(live, rel))) for rel in changed]
-for d in dict.fromkeys(need_dirs):
-    why = unwritable(d)
-    if why:
-        sys.exit(f"쓸 수 없다: {d} ({why}) · {os.environ.get('FP_NOTE', '바뀐 것 없음')}")
-for rel in changed:
-    dst = os.path.join(live, rel)
-    if os.path.isfile(dst) and getattr(os.stat(dst), "st_flags", 0) & IMMUTABLE:
-        sys.exit(f"쓸 수 없다: {dst} (잠금 플래그(uchg 등)) · 바뀐 것 없음")
-for b, dirs, _ in os.walk(live):
-    if b == live and ".cache" in dirs:
-        dirs.remove(".cache")
-    if unwritable(b) is None:
-        sweep(b)
-try:
-    # 기존 사용자 파일도 보관한다. 원본 백업 완료 전에는 live 를 고치지 않는다.
-    for rel in files(live):
-        dst = os.path.join(backup, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(os.path.join(live, rel), dst)
-except Exception as exc:
-    sys.exit(f"files-plus: 백업 실패 — 손대지 않았다: {exc}")
-def interrupted(signum, frame):
-    raise RuntimeError(f"중단 신호 {signum}")
-
-touched = []
-try:
-    signal.signal(signal.SIGINT, interrupted)
-    signal.signal(signal.SIGTERM, interrupted)
-    signal.signal(signal.SIGHUP, interrupted)      # 터미널 닫힘 · ssh 끊김: INT/TERM 과 똑같이 되돌린다
-    for rel in changed:
-        dst = os.path.join(live, rel)
-        existed = os.path.lexists(dst)
-        if existed and not os.path.isfile(dst):
-            raise OSError(f"파일 자리에 폴더가 있다: {dst}")
-        touched.append((rel, existed))
-        publish(os.path.join(stage, rel), dst)
-except BaseException as exc:
-    # 복원 중에는 추가 중단 신호를 무시한다.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    errors = []
-    for rel, existed in reversed(touched):
-        dst = os.path.join(live, rel)
-        try:
-            if existed:
-                publish(os.path.join(backup, rel), dst)
-            elif os.path.lexists(dst):
-                os.unlink(dst)
-        except Exception as restore_exc:
-            errors.append(str(restore_exc))
-    if errors:
-        sys.exit(f"files-plus: 복원 실패 — 백업: {backup}: {'; '.join(errors)}")
-    sys.exit(f"files-plus: 바꾸다 실패해 되돌렸다: {exc}")
-with open(os.environ["FP_MARK1"], "w") as f:        # 이 단계에서 실제로 바뀌었다는 표시(뒤 단계 실패 메시지용)
-    f.write("1\n")
-PY
-if [ -e "$STAGE/.changed" ]; then
-  CHANGED_LIST="$CHANGED_LIST mods/files-plus 갱신됨(원본 백업 $APP/.files-plus-backup/$TS-$$);"
-  FP_NOTE="앞 단계에서 mods/files-plus 는 이미 갱신됨(원본 백업 $APP/.files-plus-backup/$TS-$$)"
-fi
-
-# 2. 레이아웃 블록
-python3 - "$APP" "$LAYOUT" "$TS-$$" "$HERDR_APP_Q" <<'PY' || late_fail $?
-import json, os, re, shutil, signal, stat, sys, tempfile
-
-app, name, ts, herdr = sys.argv[1:5]
-link = os.path.join(app, "layouts", name + ".json")
-path = os.path.realpath(link)          # 링크면 가리키는 실제 파일에 쓴다(링크는 그대로 · 모드·줄 끝 유지)
-with open(path, encoding="utf-8", newline="") as f:
-    raw = f.read()
-crlf = "\r\n" in raw
-root = json.loads(raw)
-
-def find(node, id_):
-    if isinstance(node, dict):
-        if node.get("id") == id_:
-            return node
-        for child in node.get("children") or []:
-            hit = find(child, id_)
-            if hit:
-                return hit
-    return None
-
-body = find(root, "panel-body")
-if not body or body.get("type") != "stack":
-    sys.exit(f"{path} 에 오른쪽 패널 스택(id panel-body)이 없다. 손으로 연다:\n"
-             f"  {herdr} do pane.split '{{\"direction\":\"right\",\"mod\":\"files-plus\"}}'")
-if body.get("children") is None:
-    body["children"] = []
-kids = body["children"]
-if not isinstance(kids, list):
-    sys.exit(f"{path}: panel-body 의 children 이 목록이 아니다 — 손으로 고친다")
-dicts = [c for c in kids if isinstance(c, dict)]       # 사용자가 넣은 이상한 항목(문자열 등)은 건너뛴다
-if any((c.get("content") or {}).get("mod") == "files-plus" and c.get("id") == "files-plus" for c in dicts):
-    print(f"레이아웃 {name}: files-plus 블록이 이미 있다")
-    sys.exit(0)
-if find(root, "files-plus"):
-    sys.exit(f"{path} 에 id «files-plus» 가 다른 곳에 이미 있다 — 손으로 고친다")
-
-at = next((i + 1 for i, c in enumerate(kids) if isinstance(c, dict) and c.get("id") == "files"), len(kids))
-kids.insert(at, {"id": "files-plus", "type": "block", "content": {"mod": "files-plus"}})
-backup = os.path.join(os.path.dirname(link), os.path.basename(link) + f".bak-files-plus-{ts}")
-# 들여쓰기 꼴: 원본의 첫 들여쓴 줄에서(탭 또는 공백 수) 읽고, 못 읽으면 2칸. 끝 줄바꿈 · CRLF 도 원본대로.
-lf = raw.replace("\r\n", "\n")
-mi = re.search(r"^([ \t]+)\S", lf, re.M)
-if mi is None: unit = 2
-elif mi.group(1).startswith("\t"): unit = "\t"
-else: unit = len(mi.group(1))
-text = json.dumps(root, ensure_ascii=False, indent=unit) + ("\n" if lf.endswith("\n") else "")
-if crlf:
-    text = text.replace("\n", "\r\n")
-try:
-    if json.loads(text) != root:
-        raise ValueError("다시 읽은 값이 다르다")
-except Exception as exc:
-    sys.exit(f"{path}: 새 레이아웃 JSON 검증 실패 — 손대지 않았다: {exc}")
-orig_bytes = raw.encode("utf-8")
-new_bytes = text.encode("utf-8")
-st = os.stat(path)
-IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0) | getattr(stat, "UF_APPEND", 0) | getattr(stat, "SF_APPEND", 0)
-def cannot(why):
-    sys.exit(f"쓸 수 없다: {path} ({why}) · {os.environ.get('FP_NOTE', '바뀐 것 없음')}")
-# 쓰기 전 점검: 읽기 전용(0444) · 잠금 플래그(uchg)는 새 파일로 바꿔 끼우면 우회되므로 먼저 멈춘다. 이때는 사본도 만들지 않는다.
-if getattr(st, "st_flags", 0) & IMMUTABLE:
-    cannot("잠금 플래그(uchg 등)")
-if not os.access(path, os.W_OK):
-    cannot("쓰기 권한 없음(읽기 전용 · 소유자)")
-shutil.copy2(path, backup)
-
-def interrupted(signum, frame):
-    raise RuntimeError(f"중단 신호 {signum}")
-signal.signal(signal.SIGINT, interrupted)
-signal.signal(signal.SIGTERM, interrupted)
-signal.signal(signal.SIGHUP, interrupted)          # 터미널 닫힘 · ssh 끊김도 INT/TERM 처럼 되돌린다
-SIGS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
-
-def atomic_write():
-    # 같은 폴더에 임시 파일 → fsync → 모드·소유자·플래그를 맞춘 뒤 실제 경로(링크가 아닌 가리키는 파일)에 os.replace. 죽어도 원본 또는 새 파일 하나만 남는다.
-    try:
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".", suffix=".files-plus-tmp")
-    except OSError:
-        return False                      # 폴더에 임시 파일을 못 만든다(폴더 쓰기 권한 없음) → 제자리 쓰기로
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(new_bytes); f.flush(); os.fsync(f.fileno())
-        shutil.copymode(path, tmp)
-        ts_ = os.stat(tmp)
-        if (ts_.st_uid, ts_.st_gid) != (st.st_uid, st.st_gid):
-            try: os.chown(tmp, st.st_uid, st.st_gid)
-            except OSError: return False  # 소유자를 못 맞추면(다른 사용자 소유) 바꿔 끼우면 소유자가 바뀐다 → 제자리 쓰기(inode · 소유자 유지)로
-        if hasattr(os, "chflags") and getattr(st, "st_flags", 0):
-            try: os.chflags(tmp, st.st_flags & ~IMMUTABLE)
-            except OSError: pass
-        os.replace(tmp, path)
-        return True
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-# [주의] 하드링크(link 수 > 1)는 새 파일로 바꾸면 다른 이름과 갈라지므로 제자리 쓰기(inode 유지)로 쓴다 — 쓰는 동안 죽으면 반쯤 쓴 파일이 남을 수 있다(사본으로 복구). 실패하면 원래 바이트를 다시 쓴다.
-def inplace_write():
-    try:
-        f = open(path, "r+b")
-    except OSError as exc:
-        cannot(str(exc))
-    with f:
-        f.write(new_bytes)
-        f.truncate()
-        f.flush()
-        os.fsync(f.fileno())
-
-try:
-    if st.st_nlink != 1 or not atomic_write():
-        inplace_write()
-except SystemExit:
-    raise
-except BaseException as exc:
-    # 복원 중에는 중단 신호를 막아 두었다가 끝난 뒤 받는다(막힌 신호는 풀리면 그때 전달).
-    signal.pthread_sigmask(signal.SIG_BLOCK, SIGS)
-    try:
-        with open(path, "r+b") as f:
-            f.write(orig_bytes); f.truncate(); f.flush(); os.fsync(f.fileno())
-    except Exception as exc2:
-        sys.exit(f"{path}: 쓰다 실패, 되돌리기도 실패 — 사본: {backup}: {exc}; {exc2}")
-    sys.exit(f"{path}: 쓰다 실패해 되돌렸다: {exc}")
-with open(os.environ["FP_MARK2"], "w") as f:
-    f.write("1\n")
-print(f"레이아웃 {name}: panel-body 에 files-plus 블록을 더했다")
-PY
-if [ -e "$STAGE/.layout-changed" ]; then
-  CHANGED_LIST="$CHANGED_LIST 레이아웃 $LAYOUT 에 files-plus 블록 추가됨(사본 .bak-files-plus-$TS-$$);"
-  FP_NOTE="앞 단계에서 레이아웃 $LAYOUT 은 이미 바뀜(사본 .bak-files-plus-$TS-$$)${CHANGED_LIST:+ · $CHANGED_LIST}"
-  export FP_NOTE
-fi
-
-# 3. auto-tabs 탭바: «Files+» 단추 · (선택) 기본 Files 숨김/보임
-TABS_DIR="$APP/mods/auto-tabs"
-if [ -f "$TABS_DIR/main.js" ]; then
-  TABS_STAGE=$(mktemp -d "$APP/.auto-tabs-stage.XXXXXX")
-  # [주의] -p 를 쓰지 않는다: -p 는 잠금 플래그(uchg)까지 임시 폴더로 옮겨 치우지 못하게 만든다. 모드는 최종 쓰기에서 원본(copymode)을 따른다.
-  cp -RL "$TABS_DIR/." "$TABS_STAGE/" || { echo "auto-tabs: 검사용 사본을 만들지 못했다(읽을 수 없는 파일?) — $FP_NOTE" >&2; late_fail 1; }   # 링크는 내용으로 복사한다(검사는 실제 내용으로)
-  rc=0
-  # 결과 파일 = 항목별 낱말(btn:… · files:…). 종료 0 = 바뀜 · 10 = 바꿀 것 없음.
-  RESULT_FILE="$STAGE/.auto-tabs-result"
-  python3 - "$TABS_STAGE/main.js" "$FILES_MODE" "$RESULT_FILE" <<'PY' || rc=$?
+# auto-tabs main.js 검사·고치기(3단계) — 인자: <main.js> <모드> <결과 파일>. 모드 probe 는 «지금 우리 Files 숨김 필터가 있나» 만 읽고 아무것도 쓰지 않는다(--panel-tabs 의 hideFiles 판정용).
+autotabs_py() {
+  python3 - "$@" <<'PY'
 import os, re, sys, shutil, tempfile
 
 path, mode, result_file = sys.argv[1:4]
+predict = mode.startswith("predict:")
+if predict:
+    mode = mode[len("predict:"):]
 try:
     with open(path, encoding="utf-8", newline="") as f:      # 줄 끝(CRLF)을 그대로 읽고 그대로 쓴다
         s = f.read()
@@ -757,7 +367,7 @@ else:
 shown = '(shared("workspace.panels") ?? ["files", "changes"])'
 OUR_FILTER = '.filter(p => p !== "files")'
 FILTER_OURS = r'\s*\.filter\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*\1\s*!==?\s*(["\'])files\2\s*\)'
-if mode in ("hide-files", "show-files"):
+if mode in ("hide-files", "show-files", "probe"):
     def tail(text, kd, end):        # «shown» 뒤 파일 끝까지 · 주석은 공백으로 가린다(길이는 그대로) → 줄을 넘는 필터도 한 덩이로 본다
         return "".join(" " if kd[i] == COMMENT else text[i] for i in range(end, len(text)))
     kind, ok = scan(s)
@@ -775,7 +385,9 @@ if mode in ("hide-files", "show-files"):
             kd, good = scan(text)
             hh = live_hits(text, kd, re.escape(shown)) if good else []
             return (len(hh) == 1, bool(len(hh) == 1 and re.match(FILTER_OURS, tail(text, kd, hh[0].end()))))
-        if mode == "hide-files":
+        if mode == "probe":
+            res.append("probe:hidden" if mo else "probe:shown")      # 읽기만 — 우리 .filter 가 있으면 «숨김»
+        elif mode == "hide-files":
             if mo:
                 res.append("files:hidden-already")
             elif foreign:
@@ -806,9 +418,12 @@ if mode in ("hide-files", "show-files"):
             else:
                 res.append("files:shown-already")
 
-with open(result_file, "w", encoding="utf-8") as f:
-    f.write("\n".join(res) + "\n")
-if s == orig:
+if result_file == "-":
+    print("\n".join(res))
+else:
+    with open(result_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(res) + "\n")
+if predict or mode == "probe" or s == orig:      # 예측 · probe 는 원본을 쓰지 않는다
     sys.exit(10)
 # 숨긴 임시 파일은 앱이 다시 읽지 않는다 — 다 쓴 뒤 바꿔 끼운다(mkstemp 는 0600 → 모드를 되살린다).
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".", suffix=".files-plus-tmp")
@@ -821,13 +436,683 @@ finally:
     if os.path.exists(tmp):
         os.unlink(tmp)
 PY
+}
+
+# 레이아웃: 인자 > shared.json 의 지금 레이아웃 > main. 앱 원본은 먼저 거른다.
+ACTIVE=$(python3 -c 'import json, sys
+try: print(json.load(open(sys.argv[1], encoding="utf-8")).get("layout") or "")
+except Exception: print("")' "$APP/shared.json")
+LAYOUT=${LAYOUT_ARG:-${ACTIVE:-main}}
+# 요청이 거절될 수 있으므로 같은 패처로 읽기 전용 예측 → 거절 · 불명은 현재 상태 유지.
+PT_HIDE=false
+PT_BEFORE=false
+if [ -n "$PANEL_TABS" ] && [ -f "$APP/mods/auto-tabs/main.js" ]; then
+  PT_PROBE=$(autotabs_py "$APP/mods/auto-tabs/main.js" probe - 2>/dev/null) || true
+  case $PT_PROBE in *probe:hidden*) PT_HIDE=true ;; esac
+  PT_BEFORE=$PT_HIDE
+  PT_PREDICT=$(autotabs_py "$APP/mods/auto-tabs/main.js" "predict:$FILES_MODE" - 2>/dev/null) || true
+  case $PT_PREDICT in
+    *files:hidden-already*|*files:hidden*)
+      case $PT_PREDICT in *files:hidden-custom*) ;; *) PT_HIDE=true ;; esac ;;
+    *files:shown-already*|*files:shown*) PT_HIDE=false ;;
+  esac
+fi
+python3 - "$APP" "$LAYOUT" "$HERDR_APP_Q" "$FILES_MODE" "$REPO/files-plus" "$PT_MODE" "$PT_HIDE" "$REPO/panel-tabs" "$HERDR_APP" <<'PY'
+import filecmp, json, os, re, stat, subprocess, sys, time
+
+app, name, herdr, files_mode, repo, pt_mode, pt_hide, pt_repo, herdr_bin = sys.argv[1:10]
+want_hide = pt_hide == "true"
+if not name or name in {".", ".."} or os.path.basename(name) != name:
+    sys.exit("레이아웃 이름에 경로를 쓸 수 없다")
+try:
+    with open(os.path.join(app, "installed.json"), encoding="utf-8") as f:
+        installed = json.load(f)
+    if not isinstance(installed, dict):
+        raise ValueError("JSON 객체가 아니다")
+except Exception:
+    sys.exit("installed.json 을 읽을 수 없거나 JSON 객체가 아니다 — 설치를 멈췄다")
+if name in {"main", "terminals", "win98"} or f"layout:{name}" in installed:
+    sys.exit(f"«{name}» 는 앱이 싣는 레이아웃이라 고쳐도 앱이 되돌린다. 먼저 복제한다:\n"
+             f"  {herdr} do layout.clone '{{\"name\":\"{name}\",\"as\":\"my-{name}\"}}'\n"
+             f"  sh install-mac.sh my-{name}")
+
+# 폴더 점검 · 남은 임시 파일 청소(아래 3곳이 같은 꼴을 쓴다). [주의] 청소는 이 설치기의 임시 이름 꼴(.<8자>.files-plus-tmp)과 정확히 같은 «일반 파일»(링크 아님 · lstat) · 내 소유 · 10분 넘은 것만 지운다.
+IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0) | getattr(stat, "UF_APPEND", 0) | getattr(stat, "SF_APPEND", 0)
+TMP_RE = re.compile(r"^\.[a-z0-9_]{8}\.files-plus-tmp$")
+def unwritable(d):
+    try:
+        if getattr(os.stat(d), "st_flags", 0) & IMMUTABLE:
+            return "잠금 플래그(uchg 등)"
+        if not os.access(d, os.W_OK | os.X_OK):
+            return "쓰기 권한 없음"
+    except OSError as exc:
+        return str(exc)
+    return None
+def sweep(d):
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        if not TMP_RE.match(n):
+            continue
+        fp = os.path.join(d, n)
+        try:
+            st = os.lstat(fp)
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and time.time() - st.st_mtime > 600:
+                os.unlink(fp)
+        except OSError:
+            pass
+path = os.path.join(app, "layouts", name + ".json")
+if not os.path.isfile(path):
+    sys.exit(f"레이아웃 파일이 없다: {path}")
+# 아무것도 바꾸기 전에 거른다: 단추(togglePanel)와 자동 열기(layout.select)는 블록 id «files-plus» 로 찾는다.
+try:
+    with open(path, encoding="utf-8") as f:
+        layout = json.load(f)
+except Exception as exc:
+    sys.exit(f"레이아웃 파일을 읽을 수 없다: {path}: {exc}")
+
+def find(node, id_):
+    if isinstance(node, dict):
+        if node.get("id") == id_:
+            return node
+        for child in node.get("children") or []:
+            hit = find(child, id_)
+            if hit:
+                return hit
+    return None
+
+body = find(layout, "panel-body")
+if pt_mode != "remove" and isinstance(body, dict) and body.get("type") == "stack":
+    if body.get("children") is not None and not isinstance(body.get("children"), list):
+        sys.exit(f"레이아웃 {name}: panel-body 의 children 이 목록이 아니다 — 손으로 고친다. 손댄 것 없음.")
+    kids = [c for c in body.get("children") or [] if isinstance(c, dict)]
+    mods = [c for c in kids if (c.get("content") or {}).get("mod") == "files-plus"]
+    if mods and not any(c.get("id") == "files-plus" for c in mods):
+        bad = mods[0].get("id")
+        sys.exit(f"레이아웃 {name}: files-plus mod 블록의 id 가 «{bad}» 다 — 탭바 단추와 자동 열기는 id «files-plus» 로 찾아 동작하지 않는다.\n"
+                 f"  {path} 에서 그 블록의 id 를 «files-plus» 로 바꾼 뒤 다시 돌린다. 손댄 것 없음.")
+    need_layout = not any(c.get("id") == "files-plus" for c in mods)
+else:
+    need_layout = False
+# panel-tabs header: 설치 = 더하기 · 고치기가 필요한가 / panel-tabs 가 아닌 header 가 있으면 아무것도 바꾸기 전에 거절한다. 제거 = 우리 header 가 있을 때만 쓴다.
+def ours_header(h):
+    return isinstance(h, dict) and isinstance(h.get("content"), dict) and h["content"].get("mod") == "panel-tabs"
+def header_differs(h, hide):
+    if not ours_header(h):
+        return True
+    props = h["content"].get("props")
+    return not (isinstance(props, dict) and props.get("stack") == "panel-body" and props.get("hideFiles") is hide and h.get("height") == 32)
+need_header = need_remove = False
+if pt_mode == "install":
+    if not (isinstance(body, dict) and body.get("type") == "stack"):
+        sys.exit(f"레이아웃 {name}: 오른쪽 패널 스택(id panel-body)이 없어 panel-tabs header 를 달 곳이 없다. 손댄 것 없음.")
+    cur_header = body.get("header")
+    if cur_header is not None and not ours_header(cur_header):
+        sys.exit(f"레이아웃 {name}: panel-body 에 panel-tabs 가 아닌 header 가 이미 있다({json.dumps(cur_header, ensure_ascii=False)[:160]}) — 덮어쓰지 않으려고 멈췄다.\n"
+                 f"  {path} 에서 그 header 를 치우거나 옮긴 뒤 다시 돌린다. 손댄 것 없음.")
+    need_header = header_differs(cur_header, want_hide)
+elif pt_mode == "remove":
+    need_remove = isinstance(body, dict) and ours_header(body.get("header"))
+# [주의] 이미 거절된 현재 레이아웃은 먼저 고친다 — mod 게시 · 청소보다 앞에서 멈춘다.
+if pt_mode:
+    try:
+        r = subprocess.run([herdr_bin, "status"], capture_output=True, text=True, timeout=5)
+        status = json.loads(r.stdout) if r.returncode == 0 else None
+    except Exception:
+        status = None
+    if isinstance(status, dict) and status.get("layout") == name:
+        errors = status.get("errors")
+        hits = [e for e in (errors if isinstance(errors, list) else [])
+                if isinstance(e, str) and re.match(r"^" + re.escape(f"layouts/{name}.json") + r"(?:\s|:|$)", e)]
+        if hits:
+            sys.exit("\n".join(hits) + f"\n[경고] {path} 을 먼저 고친 뒤 다시 돌린다. 손댄 것 없음.")
+# [주의] panel-tabs 는 백업 · 복원이 링크를 일반 파일로 바꿀 수 있어 기존 링크를 거절한다.
+# [주의] files-plus 에도 같은 기존 제한이 있으나 기본 설치 동작은 그대로 둔다.
+if pt_mode == "install":
+    for base, dirs, names in os.walk(os.path.join(app, "mods", "panel-tabs")):
+        for entry in dirs + names:
+            p = os.path.join(base, entry)
+            st = os.lstat(p)
+            if stat.S_ISLNK(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_nlink > 1):
+                sys.exit(f"[경고] panel-tabs 기존 파일이 심볼릭 링크 또는 하드링크다: {p} — 링크를 고친 뒤 다시 돌린다. 손댄 것 없음.")
+# 점검: 쓸 폴더 · 고칠 «파일» 을 아무것도 바꾸기 전에 본다(traceback 없이). 폴더 = 레이아웃 링크 폴더 · 실제 파일 폴더 · 실제 main.js 폴더 · 바뀔 mods/files-plus 파일의 폴더. 파일 = 레이아웃 실제 파일 · (단추를 더해야 하면) main.js 실제 파일 · 바뀔 mods/files-plus 파일(잠금 플래그만 — 바꿔 끼우기는 읽기 전용 파일도 된다).
+def file_block(p, need_w=True):
+    try:
+        if getattr(os.stat(p), "st_flags", 0) & IMMUTABLE:
+            return "잠금 플래그(uchg 등)"
+        if need_w and not os.access(p, os.W_OK):
+            return "쓰기 권한 없음(읽기 전용 · 소유자)"
+    except OSError as exc:
+        return str(exc)
+    return None
+def repo_files(root):
+    # .cache 는 설치기가 만들지도 건드리지도 않는다 → 점검 · 청소 밖
+    for base, dirs, names in os.walk(root):
+        if base == root and ".cache" in dirs:
+            dirs.remove(".cache")
+        for n in names:
+            if base != root or n != ".cache":
+                yield os.path.relpath(os.path.join(base, n), root)
+def nearest_dir(d):
+    while d and not os.path.isdir(d):
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return d
+live = os.path.join(app, "mods", "files-plus")
+changed = [] if pt_mode == "remove" else [rel for rel in repo_files(repo)
+           if not os.path.isfile(os.path.join(live, rel))
+           or not filecmp.cmp(os.path.join(repo, rel), os.path.join(live, rel), shallow=False)]
+checks, file_checks = [], []
+if changed:
+    checks.append(nearest_dir(os.path.dirname(live)))
+    for rel in changed:
+        dst = os.path.join(live, rel)
+        checks.append(nearest_dir(os.path.dirname(dst)))
+        if os.path.isfile(dst):
+            file_checks.append((dst, False))
+# panel-tabs mod 폴더: files-plus 와 같은 점검(바뀔 파일의 폴더 · 잠금 플래그)
+pt_live = os.path.join(app, "mods", "panel-tabs")
+pt_changed = [rel for rel in repo_files(pt_repo)
+              if not os.path.isfile(os.path.join(pt_live, rel))
+              or not filecmp.cmp(os.path.join(pt_repo, rel), os.path.join(pt_live, rel), shallow=False)] if pt_mode == "install" else []
+if pt_changed:
+    checks.append(nearest_dir(os.path.dirname(pt_live)))
+    for rel in pt_changed:
+        dst = os.path.join(pt_live, rel)
+        checks.append(nearest_dir(os.path.dirname(dst)))
+        if os.path.isfile(dst):
+            file_checks.append((dst, False))
+if need_layout or need_header or need_remove:
+    checks += [os.path.dirname(path), os.path.dirname(os.path.realpath(path))]
+    file_checks.append((os.path.realpath(path), True))
+sweeps = [os.path.dirname(path), os.path.dirname(os.path.realpath(path))]
+tabs_js = os.path.join(app, "mods", "auto-tabs", "main.js")
+if pt_mode != "remove" and os.path.isfile(tabs_js):
+    tabs_dir = os.path.dirname(os.path.realpath(tabs_js))
+    sweeps.append(tabs_dir)
+    try:
+        with open(tabs_js, encoding="utf-8", errors="replace") as f:
+            has_btn = 'panelButton("files-plus"' in f.read()
+    except OSError:
+        has_btn = False
+    if files_mode or not has_btn:
+        checks.append(tabs_dir)
+    if not has_btn:
+        file_checks.append((os.path.realpath(tabs_js), True))   # 단추를 더하면 확실히 쓴다(--hide/--show 만이면 쓸지 모르니 쓰는 때 다시 본다)
+for d in dict.fromkeys(checks):
+    why = unwritable(d)
+    if why:
+        sys.exit(f"쓸 수 없다: {d} ({why}) · 바뀐 것 없음")
+for fp, need_w in dict.fromkeys(file_checks):
+    why = file_block(fp, need_w)
+    if why:
+        sys.exit(f"쓸 수 없다: {fp} ({why}) · 바뀐 것 없음")
+for d in dict.fromkeys(sweeps):
+    if unwritable(d) is None:
+        sweep(d)
+PY
+
+# 1. 숨긴 폴더에서 check 한 뒤 파일마다 바꿔 끼운다. .cache 는 그대로 둔다.
+# publish_mod <mod 이름> <저장소 폴더> <stage 폴더> <사본 상위 폴더 이름> <먼저 게시할 파일> <마지막에 게시할 파일> — files-plus · panel-tabs 가 같은 엔진을 쓴다.
+# [주의] 변경 표시($3/.changed) · 임시 파일 꼴(.<8자>.<이름>-tmp) · 사본 폴더는 mod 마다 따로다 — stage · 표시를 두 mod 가 나눠 쓰지 않는다.
+publish_mod() {
+  python3 - "$APP" "$3" "$TS-$$" "$2" "$1" "$3/.changed" "$4" "$5" "$6" <<'PY'
+import filecmp, os, re, shutil, signal, stat, sys, tempfile, time
+
+app, stage, stamp, repo, name, mark, backup_root, first, last = sys.argv[1:10]
+live = os.path.join(app, "mods", name)
+backup = os.path.join(app, backup_root, stamp)
+
+# 폴더 점검 · 남은 임시 파일 청소(아래 3곳이 같은 꼴을 쓴다). [주의] 청소는 이 설치기의 임시 이름 꼴(.<8자>.files-plus-tmp)과 정확히 같은 «일반 파일»(링크 아님 · lstat) · 내 소유 · 10분 넘은 것만 지운다.
+IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0) | getattr(stat, "UF_APPEND", 0) | getattr(stat, "SF_APPEND", 0)
+TMP_RE = re.compile(r"^\.[a-z0-9_]{8}\." + re.escape(name) + r"-tmp$")
+def unwritable(d):
+    try:
+        if getattr(os.stat(d), "st_flags", 0) & IMMUTABLE:
+            return "잠금 플래그(uchg 등)"
+        if not os.access(d, os.W_OK | os.X_OK):
+            return "쓰기 권한 없음"
+    except OSError as exc:
+        return str(exc)
+    return None
+def sweep(d):
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        if not TMP_RE.match(n):
+            continue
+        fp = os.path.join(d, n)
+        try:
+            st = os.lstat(fp)
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and time.time() - st.st_mtime > 600:
+                os.unlink(fp)
+        except OSError:
+            pass
+
+def files(root):
+    for base, dirs, names in os.walk(root):
+        if base == root and ".cache" in dirs:
+            dirs.remove(".cache")
+        for name in names:
+            if base != root or name != ".cache":
+                yield os.path.relpath(os.path.join(base, name), root)
+
+def publish(src, dst):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".", suffix=f".{name}-tmp")
+    os.close(fd)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+changed = [rel for rel in files(repo)
+           if not os.path.isfile(os.path.join(live, rel))
+           or not filecmp.cmp(os.path.join(stage, rel), os.path.join(live, rel), shallow=False)]
+if not changed:
+    sys.exit(0)
+# 게시 순서: first(mod.json) → 나머지 → last(main.js). [주의] os.walk 순서는 보장이 없고, main.js 가 mod.json 보다 먼저 놓이면 Herdr 가 «place» 를 모른 채 사본을 자동으로 붙인다. 둘 다 비면 순서는 그대로.
+_first, _last = first.split(), last.split()
+changed = [r for r in _first if r in changed] + [r for r in changed if r not in _first and r not in _last] + [r for r in _last if r in changed]
+# 바뀔 파일이 들어갈 폴더만 본다. .cache 와 설치기가 만들지 않은 폴더는 점검 · 청소 밖(그 안이 쓰기 불가여도 설치는 된다).
+def nearest_dir(d):
+    while d and not os.path.isdir(d):
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return d
+need_dirs = [nearest_dir(os.path.dirname(live))] + [nearest_dir(os.path.dirname(os.path.join(live, rel))) for rel in changed]
+for d in dict.fromkeys(need_dirs):
+    why = unwritable(d)
+    if why:
+        sys.exit(f"쓸 수 없다: {d} ({why}) · {os.environ.get('FP_NOTE', '바뀐 것 없음')}")
+for rel in changed:
+    dst = os.path.join(live, rel)
+    if os.path.isfile(dst) and getattr(os.stat(dst), "st_flags", 0) & IMMUTABLE:
+        sys.exit(f"쓸 수 없다: {dst} (잠금 플래그(uchg 등)) · 바뀐 것 없음")
+for b, dirs, _ in os.walk(live):
+    if b == live and ".cache" in dirs:
+        dirs.remove(".cache")
+    if unwritable(b) is None:
+        sweep(b)
+try:
+    # 기존 사용자 파일도 보관한다. 원본 백업 완료 전에는 live 를 고치지 않는다.
+    for rel in files(live):
+        dst = os.path.join(backup, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(os.path.join(live, rel), dst)
+except Exception as exc:
+    sys.exit(f"{name}: 백업 실패 — 손대지 않았다: {exc}")
+def interrupted(signum, frame):
+    raise RuntimeError(f"중단 신호 {signum}")
+
+touched = []
+try:
+    signal.signal(signal.SIGINT, interrupted)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)      # 터미널 닫힘 · ssh 끊김: INT/TERM 과 똑같이 되돌린다
+    for rel in changed:
+        dst = os.path.join(live, rel)
+        existed = os.path.lexists(dst)
+        if existed and not os.path.isfile(dst):
+            raise OSError(f"파일 자리에 폴더가 있다: {dst}")
+        touched.append((rel, existed))
+        publish(os.path.join(stage, rel), dst)
+except BaseException as exc:
+    # 복원 중에는 추가 중단 신호를 무시한다.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    errors = []
+    for rel, existed in reversed(touched):
+        dst = os.path.join(live, rel)
+        try:
+            if existed:
+                publish(os.path.join(backup, rel), dst)
+            elif os.path.lexists(dst):
+                os.unlink(dst)
+        except Exception as restore_exc:
+            errors.append(str(restore_exc))
+    if errors:
+        sys.exit(f"{name}: 복원 실패 — 백업: {backup}: {'; '.join(errors)}")
+    sys.exit(f"{name}: 바꾸다 실패해 되돌렸다: {exc}")
+with open(mark, "w") as f:        # 이 단계에서 실제로 바뀌었다는 표시(뒤 단계 실패 메시지용)
+    f.write("1\n")
+PY
+}
+if [ -z "$REMOVE_PT" ]; then
+STAGE=$(mktemp -d "$APP/.files-plus-stage.XXXXXX")
+cp -R "$REPO/files-plus/." "$STAGE/"
+if ! "$HERDR_APP" check "$STAGE"; then
+  echo "files-plus: check 가 떨어져 손대지 않았다" >&2
+  exit 1
+fi
+publish_mod files-plus "$REPO/files-plus" "$STAGE" .files-plus-backup "" ""
+if [ -e "$STAGE/.changed" ]; then
+  CHANGED_LIST="$CHANGED_LIST mods/files-plus 갱신됨(원본 백업 $APP/.files-plus-backup/$TS-$$);"
+  FP_NOTE="앞 단계에서 mods/files-plus 는 이미 갱신됨(원본 백업 $APP/.files-plus-backup/$TS-$$)"
+fi
+if [ -n "$PANEL_TABS" ]; then
+  # panel-tabs mod: 레이아웃 header 가 이 mod 를 가리키므로 레이아웃보다 먼저 깐다.
+  PT_STAGE=$(mktemp -d "$APP/.panel-tabs-stage.XXXXXX")
+  cp -R "$REPO/panel-tabs/." "$PT_STAGE/"
+  if ! "$HERDR_APP" check "$PT_STAGE"; then
+    echo "panel-tabs: check 가 떨어져 손대지 않았다 — $FP_NOTE" >&2
+    late_fail 1
+  fi
+  publish_mod panel-tabs "$REPO/panel-tabs" "$PT_STAGE" .panel-tabs-backup mod.json main.js || late_fail $?
+  if [ -e "$PT_STAGE/.changed" ]; then
+    CHANGED_LIST="$CHANGED_LIST mods/panel-tabs 갱신됨(원본 백업 $APP/.panel-tabs-backup/$TS-$$);"
+    PT_MSG="앞 단계에서 mods/panel-tabs 는 이미 갱신됨(원본 백업 $APP/.panel-tabs-backup/$TS-$$)"
+    if [ "$FP_NOTE" = "바뀐 것 없음" ]; then FP_NOTE=$PT_MSG; else FP_NOTE="$FP_NOTE · $PT_MSG"; fi
+    export FP_NOTE
+  fi
+fi
+LAYOUT_MARK="$STAGE/.layout-changed"
+else
+  # 제거 모드: mod 는 건드리지 않는다. 레이아웃 변경 표시만 둘 임시 폴더.
+  PT_STAGE=$(mktemp -d "$APP/.panel-tabs-stage.XXXXXX")
+  LAYOUT_MARK="$PT_STAGE/.layout-changed"
+fi
+export LAYOUT_MARK
+
+# 2. 레이아웃: files-plus 블록 + (--panel-tabs) panel-body header 추가/수정 · (--remove-panel-tabs) header 제거 — 한 번에 계산해 한 번만 저장한다(사본 하나).
+layout_py() {
+python3 - "$APP" "$LAYOUT" "$TS-$$" "$HERDR_APP_Q" "$1" "$2" "$HERDR_APP" <<'PY'
+import json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time
+
+app, name, ts, herdr, pt_mode, pt_hide, herdr_bin = sys.argv[1:8]
+want_hide = pt_hide == "true"
+link = os.path.join(app, "layouts", name + ".json")
+path = os.path.realpath(link)          # 링크면 가리키는 실제 파일에 쓴다(링크는 그대로 · 모드·줄 끝 유지)
+with open(path, encoding="utf-8", newline="") as f:
+    raw = f.read()
+crlf = "\r\n" in raw
+root = json.loads(raw)
+
+def find(node, id_):
+    if isinstance(node, dict):
+        if node.get("id") == id_:
+            return node
+        for child in node.get("children") or []:
+            hit = find(child, id_)
+            if hit:
+                return hit
+    return None
+
+def ours_header(h):
+    return isinstance(h, dict) and isinstance(h.get("content"), dict) and h["content"].get("mod") == "panel-tabs"
+def header_differs(h, hide):
+    if not ours_header(h):
+        return True
+    props = h["content"].get("props")
+    return not (isinstance(props, dict) and props.get("stack") == "panel-body" and props.get("hideFiles") is hide and h.get("height") == 32)
+
+items = []                             # 이번에 바꾼 것: block · header-add · header-update · header-remove (변경 표시 파일에 한 줄씩)
+hide_txt = "true" if want_hide else "false"
+body = find(root, "panel-body")
+if pt_mode == "repair":
+    # auto-tabs 실패: 이번에 쓴 header 의 Files 값만 실행 전 상태로 되돌린다.
+    h = body.get("header") if isinstance(body, dict) else None
+    props = h["content"].get("props") if ours_header(h) else None
+    if not isinstance(props, dict):
+        sys.exit(f"{path}: 복구할 panel-tabs header props 가 없다")
+    props["hideFiles"] = want_hide
+elif pt_mode == "remove":
+    # 제거: 우리 header(content.mod == panel-tabs)일 때만 뺀다. 그 밖(없음 · 다른 header)은 손대지 않는다.
+    if not (isinstance(body, dict) and ours_header(body.get("header"))):
+        print(f"레이아웃 {name}: panel-tabs header 없음, 바뀐 것 없음")
+        sys.exit(0)
+    del body["header"]
+    items.append("header-remove")
+else:
+    if not body or body.get("type") != "stack":
+        sys.exit(f"{path} 에 오른쪽 패널 스택(id panel-body)이 없다. 손으로 연다:\n"
+                 f"  {herdr} do pane.split '{{\"direction\":\"right\",\"mod\":\"files-plus\"}}'")
+    if body.get("children") is None:
+        body["children"] = []
+    kids = body["children"]
+    if not isinstance(kids, list):
+        sys.exit(f"{path}: panel-body 의 children 이 목록이 아니다 — 손으로 고친다")
+    dicts = [c for c in kids if isinstance(c, dict)]       # 사용자가 넣은 이상한 항목(문자열 등)은 건너뛴다
+    if any((c.get("content") or {}).get("mod") == "files-plus" and c.get("id") == "files-plus" for c in dicts):
+        print(f"레이아웃 {name}: files-plus 블록이 이미 있다")
+        if not pt_mode:
+            sys.exit(0)
+    else:
+        if find(root, "files-plus"):
+            sys.exit(f"{path} 에 id «files-plus» 가 다른 곳에 이미 있다 — 손으로 고친다")
+        at = next((i + 1 for i, c in enumerate(kids) if isinstance(c, dict) and c.get("id") == "files"), len(kids))
+        kids.insert(at, {"id": "files-plus", "type": "block", "content": {"mod": "files-plus"}})
+        items.append("block")
+    if pt_mode == "install":
+        cur = body.get("header")
+        if cur is not None and not ours_header(cur):
+            sys.exit(f"{path}: panel-body 에 panel-tabs 가 아닌 header 가 이미 있다 — 덮어쓰지 않는다")
+        if cur is None:
+            body["header"] = {"content": {"mod": "panel-tabs", "props": {"stack": "panel-body", "hideFiles": want_hide}}, "height": 32}
+            items.append("header-add")
+        elif header_differs(cur, want_hide):
+            # 우리 header: 바뀐 값만 고친다(다른 키 · 순서는 그대로)
+            if not isinstance(cur["content"].get("props"), dict):
+                cur["content"]["props"] = {}
+            cur["content"]["props"]["stack"] = "panel-body"
+            cur["content"]["props"]["hideFiles"] = want_hide
+            cur["height"] = 32
+            items.append("header-update")
+        else:
+            print(f"레이아웃 {name}: panel-tabs header 가 이미 있다(hideFiles={hide_txt})")
+    if not items:
+        sys.exit(0)
+backup = os.path.join(os.path.dirname(link), os.path.basename(link) + f".bak-files-plus-{ts}")
+# 들여쓰기 꼴: 원본의 첫 들여쓴 줄에서(탭 또는 공백 수) 읽고, 못 읽으면 2칸. 끝 줄바꿈 · CRLF 도 원본대로.
+lf = raw.replace("\r\n", "\n")
+mi = re.search(r"^([ \t]+)\S", lf, re.M)
+if mi is None: unit = 2
+elif mi.group(1).startswith("\t"): unit = "\t"
+else: unit = len(mi.group(1))
+text = json.dumps(root, ensure_ascii=False, indent=unit) + ("\n" if lf.endswith("\n") else "")
+if crlf:
+    text = text.replace("\n", "\r\n")
+try:
+    if json.loads(text) != root:
+        raise ValueError("다시 읽은 값이 다르다")
+except Exception as exc:
+    sys.exit(f"{path}: 새 레이아웃 JSON 검증 실패 — 손대지 않았다: {exc}")
+orig_bytes = raw.encode("utf-8")
+new_bytes = text.encode("utf-8")
+st = os.stat(path)
+IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0) | getattr(stat, "UF_APPEND", 0) | getattr(stat, "SF_APPEND", 0)
+def cannot(why):
+    sys.exit(f"쓸 수 없다: {path} ({why}) · {os.environ.get('FP_NOTE', '바뀐 것 없음')}")
+# 쓰기 전 점검: 읽기 전용(0444) · 잠금 플래그(uchg)는 새 파일로 바꿔 끼우면 우회되므로 먼저 멈춘다. 이때는 사본도 만들지 않는다.
+if getattr(st, "st_flags", 0) & IMMUTABLE:
+    cannot("잠금 플래그(uchg 등)")
+if not os.access(path, os.W_OK):
+    cannot("쓰기 권한 없음(읽기 전용 · 소유자)")
+if pt_mode != "repair":
+    shutil.copy2(path, backup)
+
+def interrupted(signum, frame):
+    raise RuntimeError(f"중단 신호 {signum}")
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGHUP, interrupted)          # 터미널 닫힘 · ssh 끊김도 INT/TERM 처럼 되돌린다
+SIGS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+
+def atomic_write():
+    # 같은 폴더에 임시 파일 → fsync → 모드·소유자·플래그를 맞춘 뒤 실제 경로(링크가 아닌 가리키는 파일)에 os.replace. 죽어도 원본 또는 새 파일 하나만 남는다.
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".", suffix=".files-plus-tmp")
+    except OSError:
+        return False                      # 폴더에 임시 파일을 못 만든다(폴더 쓰기 권한 없음) → 제자리 쓰기로
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new_bytes); f.flush(); os.fsync(f.fileno())
+        shutil.copymode(path, tmp)
+        ts_ = os.stat(tmp)
+        if (ts_.st_uid, ts_.st_gid) != (st.st_uid, st.st_gid):
+            try: os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError: return False  # 소유자를 못 맞추면(다른 사용자 소유) 바꿔 끼우면 소유자가 바뀐다 → 제자리 쓰기(inode · 소유자 유지)로
+        if hasattr(os, "chflags") and getattr(st, "st_flags", 0):
+            try: os.chflags(tmp, st.st_flags & ~IMMUTABLE)
+            except OSError: pass
+        os.replace(tmp, path)
+        return True
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+# [주의] 하드링크(link 수 > 1)는 새 파일로 바꾸면 다른 이름과 갈라지므로 제자리 쓰기(inode 유지)로 쓴다 — 쓰는 동안 죽으면 반쯤 쓴 파일이 남을 수 있다(사본으로 복구). 실패하면 원래 바이트를 다시 쓴다.
+def inplace_write():
+    try:
+        f = open(path, "r+b")
+    except OSError as exc:
+        cannot(str(exc))
+    with f:
+        f.write(new_bytes)
+        f.truncate()
+        f.flush()
+        os.fsync(f.fileno())
+
+err_pattern = re.compile(r"^" + re.escape(f"layouts/{name}.json") + r"(?:\s|:|$)")
+def herdr_status():
+    try:
+        r = subprocess.run([herdr_bin, "status"], capture_output=True, text=True, timeout=5)
+        d = json.loads(r.stdout) if r.returncode == 0 else None
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+def layout_errors(d):
+    errs = d.get("errors") if isinstance(d, dict) else None
+    return [e for e in (errs if isinstance(errs, list) else []) if isinstance(e, str) and err_pattern.match(e)]
+try:
+    if st.st_nlink != 1 or not atomic_write():
+        inplace_write()
+except SystemExit:
+    raise
+except BaseException as exc:
+    # 복원 중에는 중단 신호를 막아 두었다가 끝난 뒤 받는다(막힌 신호는 풀리면 그때 전달).
+    signal.pthread_sigmask(signal.SIG_BLOCK, SIGS)
+    try:
+        with open(path, "r+b") as f:
+            f.write(orig_bytes); f.truncate(); f.flush(); os.fsync(f.fileno())
+    except Exception as exc2:
+        sys.exit(f"{path}: 쓰다 실패, 되돌리기도 실패 — 사본: {backup}: {exc}; {exc2}")
+    sys.exit(f"{path}: 쓰다 실패해 되돌렸다: {exc}")
+
+if pt_mode == "repair":
+    sys.exit(0)                       # 사본 · 변경 표시는 2단계 것을 유지한다
+
+# [주의] Herdr 는 «지금 떠 있는» 레이아웃 파일이 틀리면 `herdr-app status` JSON 의 errors 에 "layouts/<이름>.json was not applied: …" 를 넣는다(0.1.17 실측 · 0.5초 안 · 고치면 사라짐). layouts/<이름>.error 파일은 쓰지 않는다(단일 layout.error 는 레이아웃을 바꿀 때만 생김).
+# [주의] 떠 있지 않은 레이아웃은 Herdr 가 파일을 보지 않아 아무 신호도 없다 → 그때는 검사할 수 없다고 알리기만 한다. status 를 못 읽으면(실패 · JSON 아님) «확인 못 함» 경고만 하고 되돌리지 않는다.
+if pt_mode:
+    herdr_err = None
+    st1 = herdr_status()
+    if st1 is None:
+        print(f"참고: `herdr-app status` 를 읽지 못해 Herdr 가 새 레이아웃을 받아들였는지 확인하지 못했다 — 직접 `{herdr} status` 로 본다", file=sys.stderr)
+    elif st1.get("layout") != name:
+        print(f"참고: 레이아웃 {name} 은 지금 떠 있지 않아 Herdr 가 파일을 아직 검사하지 않았다 — 띄운 뒤 `{herdr} status` 의 errors 를 확인한다")
+    else:
+        try:
+            for attempt in range(9):
+                if attempt:
+                    time.sleep(0.25)
+                cur_st = herdr_status() if attempt else st1
+                hits = layout_errors(cur_st)
+                if hits:
+                    herdr_err = "\n".join(hits)
+                    break
+        except BaseException as exc:
+            herdr_err = f"(기다리다 중단: {exc})"
+    if herdr_err:
+        signal.pthread_sigmask(signal.SIG_BLOCK, SIGS)
+        new_bytes = orig_bytes
+        try:
+            if st.st_nlink != 1 or not atomic_write():
+                inplace_write()
+        except BaseException as exc2:
+            sys.exit(f"{path}: Herdr 가 레이아웃을 거절했고 되돌리기도 실패 — 사본: {backup}: {exc2}\n  Herdr 메시지: {herdr_err}")
+        sys.exit(f"레이아웃 {name}: Herdr 가 새 레이아웃을 받아들이지 않았다 — 사본으로 되돌렸다(같이 넣은 블록 · header 도 되돌아감 · mod 폴더는 그대로):\n{herdr_err}")
+with open(os.environ["LAYOUT_MARK"], "w") as f:
+    f.write("\n".join(items) + "\n")
+if "block" in items:
+    print(f"레이아웃 {name}: panel-body 에 files-plus 블록을 더했다")
+if "header-add" in items:
+    print(f"레이아웃 {name}: panel-body 에 panel-tabs header 를 더했다(hideFiles={hide_txt})")
+if "header-update" in items:
+    print(f"레이아웃 {name}: panel-tabs header 를 고쳤다(hideFiles={hide_txt})")
+if "header-remove" in items:
+    print(f"레이아웃 {name}: panel-body 에서 panel-tabs header 를 뺐다")
+PY
+}
+layout_py "$PT_MODE" "$PT_HIDE" || late_fail $?
+if [ -e "$LAYOUT_MARK" ]; then
+  LAYOUT_DESC=
+  for _it in $(cat "$LAYOUT_MARK"); do
+    case $_it in
+      block) _ds="files-plus 블록 추가" ;;
+      header-add) _ds="panel-tabs header 추가" ;;
+      header-update) _ds="panel-tabs header 갱신" ;;
+      header-remove) _ds="panel-tabs header 제거" ;;
+      *) _ds= ;;
+    esac
+    [ -z "$_ds" ] || LAYOUT_DESC="${LAYOUT_DESC:+$LAYOUT_DESC · }$_ds"
+  done
+  CHANGED_LIST="$CHANGED_LIST 레이아웃 $LAYOUT 에 ${LAYOUT_DESC}됨(사본 .bak-files-plus-$TS-$$);"
+  FP_NOTE="앞 단계에서 레이아웃 $LAYOUT 은 이미 바뀜(사본 .bak-files-plus-$TS-$$)${CHANGED_LIST:+ · $CHANGED_LIST}"
+  export FP_NOTE
+fi
+
+# --remove-panel-tabs 는 여기서 끝: mod 복사 · auto-tabs · 패널 열기(4단계) 모두 하지 않는다.
+if [ -n "$REMOVE_PT" ]; then
+  [ ! -e "$LAYOUT_MARK" ] || echo "mods/panel-tabs 폴더는 그대로 둔다 — mod.json 이 place:none 이라 화면에 붙지 않는다(폴더까지 지우려면 $APP/mods/panel-tabs 를 지운다)"
+  exit 0
+fi
+
+# [주의] auto-tabs 실패로 예측이 빗나가면 이번에 쓴 header 만 실행 전 Files 상태로 맞춘다.
+auto_tabs_fail() {
+  _tabs_rc=$1
+  if [ -n "$PANEL_TABS" ] && [ "$PT_HIDE" != "$PT_BEFORE" ] && [ -f "$LAYOUT_MARK" ] && grep -Eq '^header-(add|update)$' "$LAYOUT_MARK"; then
+    if layout_py repair "$PT_BEFORE"; then
+      _repair="panel-tabs header hideFiles=$PT_BEFORE 로 복구됨(auto-tabs 실패 · 실행 전 Files 상태)"
+      echo "[주의] $_repair" >&2
+      CHANGED_LIST="$CHANGED_LIST $_repair;"
+    else
+      _repair="panel-tabs header hideFiles 복구 실패 — 2단계 사본: $APP/layouts/$LAYOUT.json.bak-files-plus-$TS-$$"
+      echo "[경고] $_repair" >&2
+      CHANGED_LIST="$CHANGED_LIST $_repair;"
+    fi
+  fi
+  late_fail "$_tabs_rc"
+}
+
+# 3. auto-tabs 탭바: «Files+» 단추 · (선택) 기본 Files 숨김/보임
+TABS_DIR="$APP/mods/auto-tabs"
+if [ -f "$TABS_DIR/main.js" ]; then
+  TABS_STAGE=$(mktemp -d "$APP/.auto-tabs-stage.XXXXXX") || { rc=$?; [ -z "$PANEL_TABS" ] && exit "$rc"; auto_tabs_fail "$rc"; }
+  # [주의] -p 를 쓰지 않는다: -p 는 잠금 플래그(uchg)까지 임시 폴더로 옮겨 치우지 못하게 만든다. 모드는 최종 쓰기에서 원본(copymode)을 따른다.
+  cp -RL "$TABS_DIR/." "$TABS_STAGE/" || { echo "auto-tabs: 검사용 사본을 만들지 못했다(읽을 수 없는 파일?) — $FP_NOTE" >&2; auto_tabs_fail 1; }   # 링크는 내용으로 복사한다(검사는 실제 내용으로)
+  rc=0
+  # 결과 파일 = 항목별 낱말(btn:… · files:…). 종료 0 = 바뀜 · 10 = 바꿀 것 없음.
+  RESULT_FILE="$STAGE/.auto-tabs-result"
+  autotabs_py "$TABS_STAGE/main.js" "$FILES_MODE" "$RESULT_FILE" || rc=$?
   case $rc in
     0)
       if ! "$HERDR_APP" check "$TABS_STAGE"; then
         echo "auto-tabs: check 가 떨어져 손대지 않았다" >&2
-        late_fail 1
+        auto_tabs_fail 1
       fi
-      python3 - "$TABS_STAGE/main.js" "$TABS_DIR/main.js" "$TS-$$" <<'PY' || late_fail $?
+      python3 - "$TABS_STAGE/main.js" "$TABS_DIR/main.js" "$TS-$$" <<'PY' || auto_tabs_fail $?
 import os, shutil, stat, sys, tempfile
 
 note = os.environ.get("FP_NOTE", "바뀐 것 없음")
@@ -858,7 +1143,7 @@ finally:
 PY
       ;;
     10) ;;
-    *) echo "auto-tabs: 고치다 실패해 손대지 않았다(rc $rc)" >&2; late_fail 1 ;;
+    *) echo "auto-tabs: 고치다 실패해 손대지 않았다(rc $rc)" >&2; auto_tabs_fail 1 ;;
   esac
   for item in $(cat "$RESULT_FILE" 2>/dev/null); do
     case $item in

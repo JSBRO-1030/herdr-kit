@@ -1,7 +1,7 @@
 # herdr-kit
 
 Herdr 앱(Mac)과 herdr-core(`hc` · 원격 리눅스 상자)에서 Claude Code 를 «옆 페인에 도우미를 두고» 쓰는 한 벌입니다.
-스킬 셋, 껍데기 에이전트, 상태줄, 핵심 CLAUDE.md 규칙, Mac 쪽 mod(files-plus), hc 명령 대조표를 함께 둡니다.
+스킬 셋, 껍데기 에이전트, 상태줄, 핵심 CLAUDE.md 규칙, Mac 쪽 mod(files-plus · panel-tabs), hc 명령 대조표를 함께 둡니다.
 
 ## 들어 있는 것
 
@@ -13,7 +13,7 @@ Herdr 앱(Mac)과 herdr-core(`hc` · 원격 리눅스 상자)에서 Claude Code 
 | `agents/` | `agy-worker` · `grok-worker` · `opencode-worker-free` — Claude 의 Agent 도구로 그 CLI 에 짧은 일을 맡기는 껍데기 | 상자 `~/.claude/agents/`(깔린 CLI 것만) |
 | `statusline/` | Claude Code 아래 상태줄: Claude 줄 + (깔렸으면) Codex 줄 · agy 줄 — 모델 · 5시간/7일 한도 · 초기화까지 남은 시간 | 상자 `~/.claude/settings.json` `statusLine` |
 | `claude/CLAUDE.md` | 핵심 전역 규칙(팀워크 판정 · 도우미 다루기 · 작업 기본 규칙) | 상자 `~/.claude/CLAUDE.md` 의 표시선 블록 |
-| `mods/` | Mac 앱 mod **files-plus** — 원격 파일 미리보기(PDF 쪽 넘기기는 Mac 앱만 · 격리 실행 아래에서 렌더) · 올리기 · 내려받기 · «터미널에 나온 파일» 줄 | Mac `~/.config/herdr-app/mods/files-plus` |
+| `mods/` | Mac 앱 mod **files-plus** — 원격 파일 미리보기(PDF 쪽 넘기기는 Mac 앱만 · 격리 실행 아래에서 렌더) · 올리기 · 내려받기 · «터미널에 나온 파일» 줄 · 선택 mod **panel-tabs**(패널 탭 줄 · 앱 0.1.17 이상) | Mac `~/.config/herdr-app/mods/files-plus` · `…/panel-tabs` |
 | `manual/` | 세트가 쓰는 hc 명령 대조표(매뉴얼은 `hc --skill`) | — |
 | `docs/` | Mac 에서 herdr-open × files-plus 를 확인하는 순서 | — |
 
@@ -43,6 +43,7 @@ bash ~/herdr-option/install.sh
 ```sh
 gh repo clone JSBRO-1030/herdr-kit ~/herdr-option
 sh ~/herdr-option/mods/install-mac.sh
+sh ~/herdr-option/mods/install-mac.sh --panel-tabs     # (선택) 패널 탭 줄 — 앱 0.1.17 이상 · 빼려면 --remove-panel-tabs · 깐 뒤 앱 다시 띄우기 권장(한계: mods/README.md)
 ```
 
 ## 쓰기
@@ -59,7 +60,8 @@ sh ~/herdr-option/mods/install-mac.sh
 ```sh
 python3 -I skills/herdr-open/test_open.py                         # herdr-open 8개(앱·코어 없이)
 bash skills/herdr-team/test_update_clis.sh                         # 업데이트 판정 13개(가짜 CLI)
-node --test mods/tests/files-plus.test.mjs mods/tests/state.test.mjs mods/tests/termfiles.test.mjs   # files-plus 291개(1개는 Linux 에서 건너뜀)
+node --test mods/tests/files-plus.test.mjs mods/tests/state.test.mjs mods/tests/termfiles.test.mjs mods/tests/panel-tabs.test.mjs   # files-plus 291개(1개는 Linux 에서 건너뜀)
+sh mods/tests/install-panel-tabs.test.sh                         # stub herdr-app 사용 · 실제 앱에 손대지 않음
 bash -n skills/herdr-team/*.sh skills/session-rotate/session-rotate.sh install.sh
 skills/session-rotate/session-rotate.sh --dry-run --skip-prep-check   # hc 터미널 안의 claude 에서 — 게이트까지만
 ```
