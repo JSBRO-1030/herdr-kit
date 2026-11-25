@@ -289,7 +289,7 @@ mkdir -p "$K/auto-tabs"
 cp "$INSTALL" "$K/install-mac.sh"
 cp -R "$REPO/files-plus" "$K/files-plus"
 cp -R "$REPO/panel-tabs" "$K/panel-tabs"
-for f in mod.json main.js owner.js panels.js names.js config.js win-close.svg win-max.svg win-min.svg win-restore.svg LICENSE-herdr-app; do
+for f in mod.json main.js owner.js panels.js names.js config.js win-close.svg win-max.svg win-min.svg win-restore.svg panel-right.svg panel-bottom.svg LICENSE-herdr-app; do
   if [ -f "$REPO/auto-tabs/$f" ]; then cp "$REPO/auto-tabs/$f" "$K/auto-tabs/$f"
   else case $f in
     mod.json) printf '{"name":"auto-tabs","place":"tabs"}\n' > "$K/auto-tabs/$f" ;;
@@ -350,15 +350,16 @@ for sid in ('panel-body','panel-bottom'):
 }
 backups() { find "$APP/.auto-tabs-backup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '; }
 m2_swap() {
-  printf 'user\n' > "$APP/mods/auto-tabs/notes.txt"; printf 'dts\n' > "$APP/mods/auto-tabs/gpui-kit.d.ts"
+  printf 'user\n' > "$APP/mods/auto-tabs/notes.txt"; printf 'dts\n' > "$APP/mods/auto-tabs/gpui-kit.d.ts"; printf 'old\n' > "$APP/mods/auto-tabs/panel-right.svg"
   cp "$APP/mods/auto-tabs/main.js" "$CONTROL/old-main"
   run --panel-tabs
   [ "$RC" -eq 0 ] || return 1
   head -n 1 "$APP/mods/auto-tabs/main.js" | grep -q '^// herdr-kit auto-tabs 2' || return 1
   cmp -s "$K/auto-tabs/main.js" "$APP/mods/auto-tabs/main.js" || return 1
+  for _s in panel-right.svg panel-bottom.svg; do cmp -s "$K/auto-tabs/$_s" "$APP/mods/auto-tabs/$_s" || return 1; done
   [ "$(backups)" = 1 ] || return 1
   B=$(find "$APP/.auto-tabs-backup" -mindepth 1 -maxdepth 1 -type d)
-  cmp -s "$B/main.js" "$CONTROL/old-main" && [ -f "$B/mod.json" ] && [ -f "$B/notes.txt" ] && [ -f "$B/gpui-kit.d.ts" ] || return 1
+  cmp -s "$B/main.js" "$CONTROL/old-main" && [ -f "$B/mod.json" ] && [ -f "$B/notes.txt" ] && [ -f "$B/gpui-kit.d.ts" ] && [ "$(cat "$B/panel-right.svg")" = old ] || return 1
   case $B in */.auto-tabs-backup/[0-9]*-[0-9]*) ;; *) return 1 ;; esac
   cfg_is false false && grep -q '^check .*auto-tabs-stage' "$STUB_LOG"
 }

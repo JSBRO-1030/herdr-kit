@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   TOOLS, SIDES, STRIP, eligible, panelsOf, findNode, locate, snapshot, planRestore, planNormalize,
-  planToggle, planOpen, planClose, moveTree, recordOf, matches, parseCommand, loadState, saveState, validClosed,
+  planToggle, planPanel, planOpen, planClose, moveTree, recordOf, matches, parseCommand, loadState, saveState, validClosed,
 } from "../auto-tabs/panels.js";
 import { Owner } from "../auto-tabs/owner.js";
 import { menuRows } from "../panel-tabs/model.js";
@@ -571,10 +571,208 @@ test("parseCommand 표", () => {
     ["constructor", null],
     ["close:graph:x", null],
     ["foo:graph", null],
+    ["panel:right", { op: "panel", side: "right" }],
+    ["panel:bottom", { op: "panel", side: "bottom" }],
+    ["panel:left", null],
+    ["panel", null],
+    ["panel:right:x", null],
     [undefined, null],
     [42, null],
   ];
   for (const [inp, out] of rows) assert.deepEqual(parseCommand(inp), out, String(inp));
+});
+
+test("planPanel 보임 → 숨김", () => {
+  const p = planPanel(snapOf(fixture({ rActive: "changes" })), [], "right");
+  assert.deepEqual(p.ops, [{ cmd: "layout.hide", args: { id: "panel" } }]);
+  assert.deepEqual(p.expect, { right: { shown: false } });
+});
+
+test("planPanel 숨김 + 스택 active chip → 그대로 보임(rec 없음)", () => {
+  const p = planPanel(snapOf(fixture({ panelHidden: true, rActive: "changes" })), [], "right");
+  assert.deepEqual(p.ops, [{ cmd: "layout.show", args: { id: "panel" } }]);
+  assert.deepEqual(p.expect, { right: { shown: true, active: "changes" } });
+});
+
+test("planPanel 숨김 + 기억한 chip active(rec) 가 스택 active 보다 우선", () => {
+  const p = planPanel(snapOf(fixture({ panelHidden: true, rActive: "changes" })), [], "right", { shown: false, active: "graph" });
+  assert.deepEqual(p.ops, [
+    { cmd: "layout.select", args: { stack: "panel-body", child: "graph" } },
+    { cmd: "layout.show", args: { id: "panel" } },
+  ]);
+  assert.deepEqual(p.expect, { right: { shown: true, active: "graph" } });
+});
+
+test("planPanel 숨김 + active 가 닫힌 도구 → 첫 chip", () => {
+  const t = fixture({ panelHidden: true, rActive: "graph" });
+  const p = planPanel(snapOf(t, OPTS, ["graph"]), ["graph"], "right");
+  assert.deepEqual(p.ops, [
+    { cmd: "layout.select", args: { stack: "panel-body", child: "files" } },
+    { cmd: "layout.show", args: { id: "panel" } },
+  ]);
+  assert.deepEqual(p.closed, ["graph"]);
+});
+
+test("planPanel 숨김 + 닫힌 도구만 → 하나 다시 열기(closed 줄어듦)", () => {
+  const t = fixture({ right: ["files-plus", "graph"], panelHidden: true, rActive: "files-plus" });
+  const shut = ["files-plus", "graph"];
+  const p = planPanel(snapOf(t, OPTS, shut), shut, "right");
+  assert.deepEqual(p.closed, ["graph"]);
+  assert.deepEqual(p.expect, { right: { shown: true, active: "files-plus" } });
+  assert.deepEqual(p.ops, [{ cmd: "layout.show", args: { id: "panel" } }]);
+});
+
+test("planPanel 숨김 + 닫힌 도구가 다른 쪽에도 중복 → 이 쪽에서 다시 열기", () => {
+  const t = fixture({ right: ["graph", "files-plus"], bottom: ["graph"], panelHidden: true, rActive: "graph", dupOk: true });
+  const shut = ["graph", "files-plus"];
+  const p = planPanel(snapOf(t, OPTS, shut), shut, "right");
+  assert.deepEqual(p.ops, [{ cmd: "layout.show", args: { id: "panel" } }]);
+  assert.deepEqual(p.closed, ["files-plus"]);
+  assert.deepEqual(p.expect, { right: { shown: true, active: "graph" } });
+});
+
+test("planPanel 쪽 없음 · 스택이 비어 있음 → 무동작", () => {
+  const none = planPanel(snapOf(fixture({ withBottom: false })), ["graph"], "bottom");
+  assert.deepEqual(none, { ops: [], closed: ["graph"], expect: {} });
+  const empty = planPanel(snapOf(fixture({ bottom: [] })), [], "bottom");
+  assert.deepEqual(empty.ops, []);
+  assert.deepEqual(planPanel(snapOf(fixture()), [], "left").ops, []);
+});
+
+test("planPanel foreign active 는 그대로 둠", () => {
+  const t = fixture({ right: ["files", { id: "sc-1", type: "block", content: { mod: "x" } }], rActive: "sc-1", panelHidden: true });
+  const p = planPanel(snapOf(t), [], "right");
+  assert.deepEqual(p.ops, [{ cmd: "layout.show", args: { id: "panel" } }]);
+  assert.deepEqual(p.expect, { right: { shown: true, active: "sc-1" } });
+});
+
+test("owner: command(panel:bottom) 큐 → ops 한 세트 · expect 일치 뒤 종료", () => {
+  const h = mkHost({ tree: fixture({ bottom: ["graph"], panelHidden: true }), store: { "panels.v2": v2({ s1: { right: REC_CLOSED, bottom: REC_CLOSED } }) }, mode: "hold" });
+  h.tick();
+  h.owner.command("panel:bottom");
+  assert.equal(h.tick().repoll, true);
+  assert.deepEqual(h.runs, [{ cmd: "layout.show", args: { id: "panel-bottom" } }]);
+  h.land();
+  const r = h.tick();
+  assert.equal(r.repoll, false);
+  assert.equal(r.sides.bottom.shown, true);
+  assert.equal(h.owner.cur, null);
+});
+
+test("owner: 공간 바뀌면 대기 중 panel 작업 버림", () => {
+  const h = mkHost({ store: { "panels.v2": v2({ s1: RIGHT_FILES, s2: RIGHT_FILES }) }, mode: "hold" });
+  h.tick("s1");
+  h.owner.command("panel:right");
+  h.tick("s2");
+  assert.equal(h.owner.queue.some((j) => j.kind === "panel"), false);
+  assert.equal(h.runs.some((r) => r.cmd === "layout.hide"), false);
+});
+
+test("owner: tick sides — 보임 · 비소유 bottom · 빈 스택", () => {
+  const h = mkHost({ tree: fixture({ bottom: ["graph"], bottomHidden: false }), store: { "panels.v2": v2({ s1: { right: REC_CLOSED, bottom: { shown: true, active: "graph" } } }) } });
+  const r = h.tick();
+  assert.deepEqual(r.sides.bottom, { exists: true, shown: true, header: true, any: true });
+  const t2 = fixture({ withBottom: true });
+  findNode(t2, "panel-bottom").header = { content: { mod: "other" }, height: 32 };
+  const r2 = mkHost({ tree: t2 }).tick();
+  assert.deepEqual(r2.sides.bottom, { exists: false, shown: false, header: false, any: false });
+  const r3 = mkHost({ tree: fixture({ bottom: [] }) }).tick();
+  assert.deepEqual(r3.sides.bottom, { exists: true, shown: false, header: true, any: false });
+  const closedOnly = mkHost({ tree: fixture({ panelHidden: true }), shared: { "panel-tabs.closed": ["files", "files-plus", "changes", "graph"] } }).tick();
+  assert.equal(closedOnly.sides.right.any, true); // 닫힌 도구뿐이어도 눌러서 다시 열 수 있음
+  const hf = mkHost({ tree: fixture({ right: ["files"], bottom: ["files-plus", "changes", "graph"], panelHidden: true }), hideFiles: true }).tick();
+  assert.equal(hf.sides.right.any, false); // --hide-files: 오른쪽엔 못 여는 files 뿐 → 토글 없음
+});
+
+// 토글이 보임 ⇔ 누르면 뭔가 일어남(op 있음 또는 닫힌 도구 다시 열기)
+test("invariant: sidesOf.any ⇔ planPanel 이 일을 함", () => {
+  const FOREIGN = blk("sc-1");
+  const cases = [
+    ["전부 닫힘", { tree: fixture({ panelHidden: true }), shared: { "panel-tabs.closed": [...TOOLS] } }],
+    ["부적격만", { tree: fixture({ right: ["files"], bottom: ["files-plus", "changes", "graph"], panelHidden: true }), hideFiles: true }],
+    ["foreign 만 보임", { tree: fixture({ right: [FOREIGN], rActive: "sc-1" }) }],
+    ["foreign 만 숨김", { tree: fixture({ right: [FOREIGN], rActive: "sc-1", panelHidden: true }) }],
+    ["비소유 bottom", { tree: (() => { const t = fixture({ bottom: ["graph"], bottomHidden: false }); findNode(t, "panel-bottom").header = { content: { mod: "other" } }; return t; })() }],
+    ["빈 스택", { tree: fixture({ right: [], bottom: [] }) }],
+    ["보통", { tree: fixture({ panelHidden: true }) }],
+  ];
+  for (const [name, o] of cases) {
+    const h = mkHost(o);
+    const r = h.tick();
+    const closed = validClosed(h.shared["panel-tabs.closed"]);
+    const snap = snapshot(h.tree, { panels: h.panels, hideFiles: o.hideFiles ?? false }, closed);
+    for (const side of ["right", "bottom"]) {
+      const p = planPanel(snap, closed, side);
+      const acts = p.ops.length > 0 || p.closed.length < closed.length;
+      assert.equal(r.sides[side].any, acts, `${name}/${side}`);
+    }
+  }
+});
+
+// tick 의 복원이 빈 스택을 먼저 숨기므로, 보이는 빈 스택은 snapshot 으로 직접 확인.
+test("invariant: 보이는 빈 스택 → any=true 이고 planPanel 이 숨김", () => {
+  const snap = snapshot(fixture({ right: [], panelHidden: false }), OPTS, []);
+  assert.equal(snap.right.shown, true);
+  assert.equal(mkHost().owner.sidesOf(snap).right.any, true);
+  const p = planPanel(snap, [], "right");
+  assert.deepEqual(p.ops, [{ cmd: "layout.hide", args: { id: "panel" } }]);
+  assert.deepEqual(p.expect, { right: { shown: false } });
+});
+
+test("header 없는 오른쪽: sides.right.header=false, res.on 이 보이는 도구", () => {
+  const t = fixture({ rActive: "changes" });
+  delete findNode(t, "panel-body").header;
+  const r = mkHost({ tree: t, store: { "panels.v2": v2({ s1: { right: { shown: true, active: "changes" }, bottom: REC_CLOSED } }) } }).tick();
+  assert.equal(r.sides.right.header, false);
+  assert.equal(r.sides.right.exists, true);
+  assert.deepEqual([...r.on], ["changes"]);
+  assert.equal(snapOf(t).right.header, false);
+});
+
+test("F3: 공간 A 의 숨긴 쪽 마지막 도구는 B 를 거쳐도 기억", () => {
+  const h = mkHost({ tree: fixture({ rActive: "graph" }), store: { "panels.v2": v2({
+    A: { right: { shown: true, active: "graph" }, bottom: REC_CLOSED },
+    B: { right: { shown: true, active: "files" }, bottom: REC_CLOSED },
+  }) } });
+  const spin = (sp) => { for (let i = 0; i < 4; i++) { h.tick(sp); h.t += 10; } };
+  spin("A");
+  h.owner.command("panel:right"); spin("A");
+  assert.equal(findNode(h.tree, "panel").hidden, true);
+  assert.equal(JSON.parse(h.store["panels.v2"]).spaces.A.right.active, "graph");
+  spin("B");
+  assert.equal(findNode(h.tree, "panel-body").active, "files");
+  spin("A");
+  assert.equal(JSON.parse(h.store["panels.v2"]).spaces.A.right.active, "graph");
+  h.owner.command("panel:right"); spin("A");
+  assert.equal(findNode(h.tree, "panel").hidden, false);
+  assert.equal(findNode(h.tree, "panel-body").active, "graph");
+});
+
+test("recordOf 직전 기록이 보임이면 숨김 시점 live active 를 기록", () => {
+  const s = snapOf(fixture({ panelHidden: true, rActive: "graph" }));
+  assert.equal(recordOf(s, { right: { shown: true, active: "files" } }).right.active, "graph");
+  assert.equal(recordOf(s, { right: { shown: false, active: "files" } }).right.active, "files");
+});
+
+test("graph 토글 직후 panel:right (idle tick 없음) → 다시 열면 graph", () => {
+  const h = mkHost({ tree: fixture({ rActive: "files" }), store: { "panels.v2": v2({ s1: { right: { shown: true, active: "files" }, bottom: REC_CLOSED } }) } });
+  h.tick();
+  h.owner.command("graph"); h.owner.command("panel:right");
+  for (let i = 0; i < 6; i++) { h.tick(); h.t += 10; }
+  assert.equal(findNode(h.tree, "panel").hidden, true);
+  assert.deepEqual(JSON.parse(h.store["panels.v2"]).spaces.s1.right, { shown: false, active: "graph" });
+  h.owner.command("panel:right");
+  for (let i = 0; i < 4; i++) { h.tick(); h.t += 10; }
+  assert.equal(findNode(h.tree, "panel").hidden, false);
+  assert.equal(findNode(h.tree, "panel-body").active, "graph");
+});
+
+test("recordOf 숨긴 쪽은 이전 active 유지 · planPanel 은 기록 우선", () => {
+  const s = snapOf(fixture({ panelHidden: true, rActive: "files" }));
+  assert.equal(recordOf(s, { right: { shown: false, active: "graph" } }).right.active, "graph");
+  assert.equal(recordOf(snapOf(fixture({ rActive: "files" })), { right: { shown: true, active: "graph" } }).right.active, "files");
+  assert.equal(planPanel(s, [], "right", { shown: false, active: "graph" }).expect.right.active, "graph");
+  assert.equal(planPanel(s, [], "right", { shown: false, active: "nope" }).expect.right.active, "files");
 });
 
 // ---- 상태 ----
@@ -697,7 +895,7 @@ test("owner: toggle = select+show, 기대 트리 확인 뒤에야 끝", () => {
   h.land();
   const r = h.tick();
   assert.equal(r.repoll, false);
-  assert.deepEqual([...r.on], ["changes"]);
+  assert.deepEqual(r.sides.right, { exists: true, shown: true, header: true, any: true });
 });
 
 test("owner: 옮기기 둘 연달아 — 두 번째 set 은 첫째가 닿은 뒤, 최신 트리로", () => {
@@ -977,7 +1175,7 @@ for (const kind of ["column", "no-header", "no-children"]) {
     else if (kind === "no-header") delete bottom.header;
     else delete bottom.children;
     const before = J(tree);
-    assert.deepEqual(snapOf(tree).bottom, { exists: false, shown: false, active: null, children: [], ok: [], chips: [], foreign: [] });
+    assert.deepEqual(snapOf(tree).bottom, { exists: false, shown: false, header: false, active: null, children: [], ok: [], chips: [], foreign: [] });
     assert.deepEqual(moveTree(tree, "files", "bottom"), { error: "no-dest" });
     const h = mkHost({ tree });
     h.tick();

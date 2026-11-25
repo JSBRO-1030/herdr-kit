@@ -4,8 +4,8 @@ import { h_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, nextCommand, notify } from "herdr";
 import config from "./config.js";
 import { syncNames } from "./names.js";
-import { Owner, POLL_MS, OWNER_BEAT_MS } from "./owner.js";
 import { eligible } from "./panels.js";
+import { Owner, POLL_MS, OWNER_BEAT_MS } from "./owner.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -38,7 +38,6 @@ export default class Tabs extends View {
     this.scroll = ScrollHandle.new();
     this.swipe = { acc: 0, steps: 0, at: 0, last: 0 };
     this.polling = false;
-    this.on = new Set();
     if (config.names) cx.timer.every(3000, () => syncNames());
     this.owner = new Owner({
       run, notify, now: () => Date.now(),
@@ -120,19 +119,27 @@ export default class Tabs extends View {
     // 옆 패널은 소유자(owner.js)가 맡는다: 기억 · 복원 · 단추 · 옮기기 · 닫기.
     const panels = shared("workspace.panels");
     const res = this.owner.tick(root, space?.id, { panels });
-    this.on = res.on;
     if (res.repoll && !this.polling) {
       this.polling = true;
       cx.timer.after(POLL_MS, (cx) => { this.polling = false; cx.notify(); });
     }
+    const toggle = (side, icon) => {
+      const on = res.sides[side].shown;
+      return h_flex().id(side === "right" ? "panel-right" : "panel-bottom-btn").h(26).px(6).flex_none().items_center().rounded(6)
+        .bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { this.owner.command(`panel:${side}`); cx.notify(); }).child(svg(icon).size(14));
+    };
+    // 탭 줄(header) 없는 오른쪽 = 토글 하나로는 다른 도구·닫은 도구에 못 닿음 → 도구 단추로 대체.
     const opts = { panels, hideFiles: Boolean(config.hideFiles) };
     const panelButton = (id, label, icon) => {
-      const on = this.on.has(id);
+      const on = res.on.has(id);
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click((_e, cx) => { this.owner.command(`toggle:${id}`); cx.notify(); }).child(svg(icon).size(14)).child(label);
     };
+    const bare = res.sides.right.exists && !res.sides.right.header;
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => this.wheel(e))
@@ -140,10 +147,12 @@ export default class Tabs extends View {
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
         .children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
-      .when(eligible("files", opts), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
-      .child(panelButton("files-plus", "Files+", "mods/files-plus/folder.svg"))
-      .when(eligible("changes", opts), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
-      .child(panelButton("graph", "Git", "mods/git-graph/icons/graph.svg"))
+      .when(bare && eligible("files", opts), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
+      .when(bare, el => el.child(panelButton("files-plus", "Files+", "mods/files-plus/folder.svg")))
+      .when(bare && eligible("changes", opts), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
+      .when(bare, el => el.child(panelButton("graph", "Git", "mods/git-graph/icons/graph.svg")))
+      .when(res.sides.right.exists && res.sides.right.header && res.sides.right.any, el => el.child(toggle("right", "mods/auto-tabs/panel-right.svg")))
+      .when(res.sides.bottom.exists && res.sides.bottom.any, el => el.child(toggle("bottom", "mods/auto-tabs/panel-bottom.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/auto-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/auto-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/auto-tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

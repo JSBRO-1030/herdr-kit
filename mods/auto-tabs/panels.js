@@ -58,7 +58,7 @@ export function locate(root, id) {
   return hits[0] ?? null;
 }
 
-const emptySide = () => ({ exists: false, shown: false, active: null, children: [], ok: [], chips: [], foreign: [] });
+const emptySide = () => ({ exists: false, shown: false, header: false, active: null, children: [], ok: [], chips: [], foreign: [] });
 
 export function snapshot(root, opts = {}, closed = []) {
   const shut = validClosed(closed);
@@ -71,6 +71,8 @@ export function snapshot(root, opts = {}, closed = []) {
     out[side] = {
       exists: true,
       shown: !vis.hidden,
+      // 탭 줄(panel-tabs header)이 있는 스택만 위쪽 바 토글로 다룸. 없으면 도구 단추로 대체.
+      header: stack.header?.content?.mod === "panel-tabs",
       active: stack.active ?? null,
       children,
       // 닫힘 무시하고 eligible 인 도구(다시 열 수 있는 것)
@@ -82,11 +84,15 @@ export function snapshot(root, opts = {}, closed = []) {
   return out;
 }
 
-export function recordOf(snap) {
+// 숨겨진 쪽은 직전 기록의 active 를 유지(전역 스택 active 는 다른 공간 값일 수 있음).
+// 단 직전 기록이 보임이었으면 방금 숨긴 것 → 숨길 때의 live active 를 기록.
+export function recordOf(snap, prev) {
   const rec = {};
   for (const side of SIDE_KEYS) {
     const s = snap?.[side];
-    rec[side] = s?.exists ? { shown: Boolean(s.shown), active: s.active ?? null } : { shown: false, active: null };
+    if (!s?.exists) { rec[side] = { shown: false, active: null }; continue; }
+    const keep = !s.shown && isObj(prev?.[side]) && prev[side].shown === false && typeof prev[side].active === "string";
+    rec[side] = { shown: Boolean(s.shown), active: keep ? prev[side].active : (s.active ?? null) };
   }
   return rec;
 }
@@ -207,6 +213,29 @@ export function planToggle(snap, closed, id) {
   return { ops, closed: shut, expect };
 }
 
+// 위쪽 바 쪽 토글: 보이면 숨김, 숨겨져 있으면 기억한 도구(없으면 첫 chip · foreign)로 보임.
+// rec = 이 공간의 그 쪽 기록 {shown, active}. 고를 수 있으면(chip·foreign) 우선.
+export function planPanel(snap, closed, side, rec) {
+  const shut = validClosed(closed);
+  const s = snap?.[side];
+  if (!s?.exists) return noop(shut);
+  if (s.shown) return { ops: [hide(side)], closed: shut, expect: { [side]: { shown: false } } };
+  const pick = [...s.chips, ...s.foreign];
+  if (pick.length) {
+    const id = pick.includes(rec?.active) ? rec.active : pick.includes(s.active) ? s.active : (s.chips[0] ?? s.foreign[0]);
+    const ops = [], expect = {};
+    reveal(s, side, id, ops, expect);
+    return { ops, closed: shut, expect };
+  }
+  // 보일 chip 이 없고 닫힌 도구만 있으면 첫 닫힌 도구를 다시 연다(«+» 가 숨은 header 에 있는 막다른 길 방지).
+  // 쪽은 이미 알므로 sideOf 를 거치지 않음(중복 id 면 sideOf 가 null → 무동작).
+  const again = s.ok.find((c) => shut.includes(c));
+  if (!again) return noop(shut);
+  const ops = [], expect = {};
+  reveal(s, side, again, ops, expect);
+  return { ops, closed: shut.filter((c) => c !== again), expect };
+}
+
 function strip(node) {
   if (!isObj(node)) return;
   for (const f of STRIP) delete node[f];
@@ -253,6 +282,7 @@ export function moveTree(root, id, dest, opts = {}, closed = []) {
 export function parseCommand(str) {
   if (typeof str !== "string") return null;
   const p = str.trim().split(":");
+  if (p.length === 2 && p[0] === "panel") return Object.hasOwn(SIDES, p[1]) ? { op: "panel", side: p[1] } : null;
   if (p.length === 1) return isTool(p[0]) ? { op: "toggle", id: p[0] } : null;
   const [op, id, side] = p;
   if (!isTool(id)) return null;
