@@ -282,5 +282,292 @@ setup; report 'F4 show check failure restores hidden header' auto_failure --show
 setup; report 'F4 unchanged hideFiles skips repair write' auto_failure_unchanged
 setup; report 'F4 repair preserves hardlink / tabs / CRLF' auto_failure_hardlink
 setup; report 'F4 repair failure reports step-2 backup' auto_failure_repair_error
+# ---- M2 (옮기기 · 닫기 · 「+」): kit 판 auto-tabs 바꿔 끼우기 + panel-bottom ----
+# 저장소 mods/auto-tabs 가 아직 덜 채워졌어도 시험이 돌도록 임시 저장소 사본에 있는 것은 복사하고 없는 관리 파일만 시험용으로 만든다(저장소 파일은 건드리지 않는다).
+K="$TMP/k"
+mkdir -p "$K/auto-tabs"
+cp "$INSTALL" "$K/install-mac.sh"
+cp -R "$REPO/files-plus" "$K/files-plus"
+cp -R "$REPO/panel-tabs" "$K/panel-tabs"
+for f in mod.json main.js owner.js panels.js names.js config.js win-close.svg win-max.svg win-min.svg win-restore.svg LICENSE-herdr-app; do
+  if [ -f "$REPO/auto-tabs/$f" ]; then cp "$REPO/auto-tabs/$f" "$K/auto-tabs/$f"
+  else case $f in
+    mod.json) printf '{"name":"auto-tabs","place":"tabs"}\n' > "$K/auto-tabs/$f" ;;
+    main.js) printf '// herdr-kit auto-tabs 2 (test fixture)\nimport config from "./config.js";\n// syncNames\n' > "$K/auto-tabs/$f" ;;
+    config.js) printf 'export default { names: false, hideFiles: false };\n' > "$K/auto-tabs/$f" ;;
+    *) printf 'fixture %s\n' "$f" > "$K/auto-tabs/$f" ;;
+  esac; fi
+done
+head -n 1 "$K/auto-tabs/main.js" | grep -q '^// herdr-kit auto-tabs 2' || { echo "kit main.js 첫 줄 표식이 없다" >&2; exit 1; }
+setup2() {
+  setup
+  INSTALL="$K/install-mac.sh"
+  STUB_VERSION='herdr-app 0.1.18'; export STUB_VERSION
+  python3 - "$APP/layouts/my-main.json" <<'PY'
+import json,sys
+body={"id":"panel-body","type":"stack","active":"files","children":[{"id":n,"type":"block","content":{"mod":n}} for n in ["files","files-plus","changes","graph"]]}
+panel={"id":"panel","type":"column","size":{"px":368},"hidden":True,"children":[body]}
+work={"id":"work","type":"column","children":[{"id":"top","type":"block","content":{"mod":"auto-tabs"}},{"id":"term","type":"block","content":{"mod":"terminal"}},{"id":"status","type":"block","content":{"mod":"status"}}]}
+with open(sys.argv[1],"w") as f: json.dump({"id":"root","type":"row","children":[work,panel]},f,indent=2); f.write("\n")
+PY
+}
+# 레이아웃을 파이썬 식으로 고친다: lay '<식>' — d 는 레이아웃, find(id) 로 노드를 찾는다.
+lay() {
+  python3 - "$APP/layouts/my-main.json" "$1" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+def find(n,i):
+    if isinstance(n,dict):
+        if n.get("id")==i: return n
+        for c in n.get("children") or []:
+            h=find(c,i)
+            if h: return h
+exec(sys.argv[2])
+json.dump(d,open(p,"w"),indent=2); open(p,"a").write("\n")
+PY
+}
+# 레이아웃을 검사한다: chk '<assert 식>'
+chk() {
+  python3 - "$APP/layouts/my-main.json" "$1" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+def find(n,i):
+    if isinstance(n,dict):
+        if n.get("id")==i: return n
+        for c in n.get("children") or []:
+            h=find(c,i)
+            if h: return h
+def ids(n): return [c["id"] for c in (find(d,n) or {}).get("children",[])]
+exec(sys.argv[2])
+PY
+}
+cfg_is() { grep -qF "export default { names: $1, hideFiles: $2 };" "$APP/mods/auto-tabs/config.js"; }
+hdrs() {
+  chk "
+for sid in ('panel-body','panel-bottom'):
+    h=find(d,sid)['header']
+    assert h=={'content':{'mod':'panel-tabs','props':{'stack':sid,'hideFiles':$([ "$1" = true ] && echo True || echo False)}},'height':32},(sid,h)"
+}
+backups() { find "$APP/.auto-tabs-backup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '; }
+m2_swap() {
+  printf 'user\n' > "$APP/mods/auto-tabs/notes.txt"; printf 'dts\n' > "$APP/mods/auto-tabs/gpui-kit.d.ts"
+  cp "$APP/mods/auto-tabs/main.js" "$CONTROL/old-main"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] || return 1
+  head -n 1 "$APP/mods/auto-tabs/main.js" | grep -q '^// herdr-kit auto-tabs 2' || return 1
+  cmp -s "$K/auto-tabs/main.js" "$APP/mods/auto-tabs/main.js" || return 1
+  [ "$(backups)" = 1 ] || return 1
+  B=$(find "$APP/.auto-tabs-backup" -mindepth 1 -maxdepth 1 -type d)
+  cmp -s "$B/main.js" "$CONTROL/old-main" && [ -f "$B/mod.json" ] && [ -f "$B/notes.txt" ] && [ -f "$B/gpui-kit.d.ts" ] || return 1
+  case $B in */.auto-tabs-backup/[0-9]*-[0-9]*) ;; *) return 1 ;; esac
+  cfg_is false false && grep -q '^check .*auto-tabs-stage' "$STUB_LOG"
+}
+m2_keep_nonmanaged() {
+  printf 'user\n' > "$APP/mods/auto-tabs/notes.txt"; printf 'dts\n' > "$APP/mods/auto-tabs/gpui-kit.d.ts"; printf '{}\n' > "$APP/mods/auto-tabs/jsconfig.json"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && [ "$(cat "$APP/mods/auto-tabs/notes.txt")" = user ] && [ "$(cat "$APP/mods/auto-tabs/gpui-kit.d.ts")" = dts ] && [ -f "$APP/mods/auto-tabs/jsconfig.json" ]
+}
+m2_names_true() {
+  printf '\nsyncNames();\n' >> "$APP/mods/auto-tabs/main.js"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && cfg_is true false || return 1
+  run --panel-tabs        # kit 판이 된 뒤에는 옛 config 의 names 를 이어 간다
+  [ "$RC" -eq 0 ] && cfg_is true false
+}
+m2_names_false() {
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && cfg_is false false || return 1
+  grep -q syncNames "$APP/mods/auto-tabs/main.js" || return 1     # kit main.js 글에 syncNames 가 있어도 config 가 false 면 false
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && cfg_is false false
+}
+m2_hide_from_old_filter() {
+  python3 - "$APP/mods/auto-tabs/main.js" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read(); s=s.replace('const panels = (shared("workspace.panels") ?? ["files", "changes"]);','const panels = (shared("workspace.panels") ?? ["files", "changes"]).filter(p => p !== "files");'); open(p,"w").write(s)
+PY
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && cfg_is false true && hdrs true
+}
+m2_flags() {
+  run --panel-tabs --hide-files
+  [ "$RC" -eq 0 ] && cfg_is false true && hdrs true || return 1
+  run --panel-tabs --show-files
+  [ "$RC" -eq 0 ] && cfg_is false false && hdrs false || return 1
+  # --panel-tabs 없이도(kit 판이 깔려 있으면) config.js 와 두 header 를 함께 고친다
+  run --hide-files
+  [ "$RC" -eq 0 ] && cfg_is false true && hdrs true || return 1
+  run --show-files
+  [ "$RC" -eq 0 ] && cfg_is false false && hdrs false
+}
+m2_shape() {
+  run --panel-tabs
+  [ "$RC" -eq 0 ] || return 1
+  chk "
+w=find(d,'work')['children']
+i=[c['id'] for c in w].index('panel-bottom')
+assert w[i+1]['id']=='status' and i==2,[c['id'] for c in w]
+exp={'id':'panel-bottom','type':'stack','size':{'px':240},'hidden':True,'children':[],'header':{'content':{'mod':'panel-tabs','props':{'stack':'panel-bottom','hideFiles':False}},'height':32}}
+assert json.dumps(w[i])==json.dumps(exp),w[i]"
+}
+m2_shape_no_status() {
+  lay "find(d,'work')['children'].pop()"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && chk "assert ids('work')==['top','term','panel-bottom'],ids('work')"
+}
+m2_idempotent() {
+  run --panel-tabs
+  [ "$RC" -eq 0 ] || return 1
+  lay "
+b=find(d,'panel-bottom'); g=[c for c in find(d,'panel-body')['children'] if c['id']=='graph'][0]
+find(d,'panel-body')['children'].remove(g); b['children'].append(g); b['hidden']=False; b['active']='graph'; b['size']={'px':300}"
+  cp "$APP/layouts/my-main.json" "$CONTROL/layout-before"
+  cp -R "$APP/mods" "$CONTROL/mods-before"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && cmp -s "$CONTROL/layout-before" "$APP/layouts/my-main.json" && [ "$(backups)" = 1 ] &&
+    diff -r "$CONTROL/mods-before" "$APP/mods" >/dev/null &&
+    chk "b=find(d,'panel-bottom'); assert ids('panel-bottom')==['graph'] and b['hidden'] is False and b['active']=='graph' and b['size']=={'px':300}"
+}
+m2_idempotent_fix_props() {
+  # 우리 panel-bottom 은 header props 만 맞춘다(children · hidden · size · active 그대로)
+  run --panel-tabs
+  lay "
+b=find(d,'panel-bottom'); b['children'].append({'id':'graph','type':'block','content':{'mod':'graph'}}); b['hidden']=False; b['active']='graph'
+find(d,'panel-body')['children']=[c for c in find(d,'panel-body')['children'] if c['id']!='graph']
+b['header']['content']['props']['hideFiles']=True; b['header']['height']=10"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && hdrs false && chk "b=find(d,'panel-bottom'); assert ids('panel-bottom')==['graph'] and b['hidden'] is False and b['active']=='graph' and b['size']=={'px':240}"
+}
+m2_foreign_bottom() {
+  lay "find(d,'work')['children'].insert(1,{'id':'panel-bottom','type':'stack','children':[]})"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && grep -q 'panel-bottom 이 이미 있는데' "$CONTROL/output" &&
+    chk "assert json.dumps(find(d,'panel-bottom'))==json.dumps({'id':'panel-bottom','type':'stack','children':[]}); assert find(d,'panel-body')['header']['content']['mod']=='panel-tabs'"
+}
+m2_no_work() {
+  lay "find(d,'work')['id']='w2'"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && grep -q 'work 열' "$CONTROL/output" &&
+    chk "assert find(d,'panel-bottom') is None; assert find(d,'panel-body')['header']['content']['mod']=='panel-tabs'"
+}
+m2_dup() {
+  lay "
+b={'id':'panel-bottom','type':'stack','hidden':True,'children':[{'id':'graph','type':'block','content':{'mod':'graph'}}],'header':{'content':{'mod':'panel-tabs','props':{'stack':'panel-bottom','hideFiles':False}},'height':32}}
+find(d,'work')['children'].insert(2,b)"
+  unchanged_refusal --panel-tabs && grep -q '양쪽' "$CONTROL/output"
+}
+m2_files_plus_in_bottom() {
+  lay "
+body=find(d,'panel-body'); fp=[c for c in body['children'] if c['id']=='files-plus'][0]; body['children'].remove(fp)
+b={'id':'panel-bottom','type':'stack','hidden':True,'children':[fp],'header':{'content':{'mod':'panel-tabs','props':{'stack':'panel-bottom','hideFiles':False}},'height':32}}
+find(d,'work')['children'].insert(2,b)"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && chk "assert ids('panel-body')==['files','changes','graph'] and ids('panel-bottom')==['files-plus']" &&
+    grep -qF 'do layout.select {"stack":"panel-bottom","child":"files-plus"}' "$STUB_LOG" &&
+    grep -qF 'do layout.show {"id":"panel-bottom"}' "$STUB_LOG" && ! grep -qF '{"id":"panel"}' "$STUB_LOG"
+}
+m2_open_right() {
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && grep -qF 'do layout.select {"stack":"panel-body","child":"files-plus"}' "$STUB_LOG" &&
+    grep -qF 'do layout.show {"id":"panel"}' "$STUB_LOG"
+}
+m2_foreign_files_plus() {
+  lay "
+body=find(d,'panel-body'); fp=[c for c in body['children'] if c['id']=='files-plus'][0]; body['children'].remove(fp)
+find(d,'work')['children'].insert(2,{'id':'panel-bottom','type':'stack','hidden':True,'children':[fp]})"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && chk "assert ids('panel-bottom')==['files-plus'] and 'files-plus' not in ids('panel-body')" &&
+    ! grep -q '^do layout.select ' "$STUB_LOG" && ! grep -q '^do layout.show ' "$STUB_LOG"
+}
+m2_remove() {
+  run --panel-tabs
+  lay "
+b=find(d,'panel-bottom'); body=find(d,'panel-body')
+g=[c for c in body['children'] if c['id']=='graph'][0]; ch=[c for c in body['children'] if c['id']=='changes'][0]
+body['children']=[c for c in body['children'] if c['id'] not in ('graph','changes')]
+b['children']=[g,{'id':'x1','type':'block','content':{'mod':'x'}},ch]"
+  run --remove-panel-tabs
+  [ "$RC" -eq 0 ] && chk "
+assert find(d,'panel-bottom') is None
+assert ids('panel-body')==['files','files-plus','graph','x1','changes'],ids('panel-body')
+assert 'header' not in find(d,'panel-body')
+assert ids('work')==['top','term','status']" &&
+    head -n 1 "$APP/mods/auto-tabs/main.js" | grep -q '^// herdr-kit auto-tabs 2' &&
+    grep -q "옛 판 사본: $APP/.auto-tabs-backup/" "$CONTROL/output"
+}
+m2_remove_collision() {
+  run --panel-tabs
+  [ "$RC" -eq 0 ] || return 1
+  lay "find(d,'panel-bottom')['children']=[{'id':'files','type':'block','content':{'mod':'custom'}}]"
+  cp "$APP/layouts/my-main.json" "$CONTROL/layout-before"
+  run --remove-panel-tabs
+  [ "$RC" -ne 0 ] && cmp -s "$CONTROL/layout-before" "$APP/layouts/my-main.json" &&
+    grep -q 'files' "$CONTROL/output" && grep -q '손으로 고친다' "$CONTROL/output"
+}
+m2_remove_backup_none() {
+  run --remove-panel-tabs
+  [ "$RC" -eq 0 ] && grep -q '옛 판 사본: 없음' "$CONTROL/output"
+}
+m2_bytes_equal() {
+  cp "$APP/layouts/my-main.json" "$CONTROL/orig"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && ! cmp -s "$CONTROL/orig" "$APP/layouts/my-main.json" || return 1
+  run --remove-panel-tabs
+  [ "$RC" -eq 0 ] && cmp -s "$CONTROL/orig" "$APP/layouts/my-main.json"
+}
+m2_no_auto_block() {
+  lay "find(d,'work')['children']=[c for c in find(d,'work')['children'] if c['id']!='top']"
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && grep -q '위쪽 바가 auto-tabs 가 아니라 옮기기·닫기·+ 는 꺼짐(M1 탭 줄만)' "$CONTROL/output" &&
+    chk "assert find(d,'panel-bottom') is None; assert find(d,'panel-body')['header']['content']['mod']=='panel-tabs'" &&
+    ! head -n 1 "$APP/mods/auto-tabs/main.js" | grep -q 'herdr-kit' && [ ! -d "$APP/.auto-tabs-backup" ]
+}
+m2_old_version() {
+  STUB_VERSION='herdr-app 0.1.17'; export STUB_VERSION
+  run --panel-tabs
+  [ "$RC" -eq 0 ] && grep -q 'Herdr 0.1.18 미만 — 옮기기·닫기·+ 는 꺼짐' "$CONTROL/output" &&
+    chk "assert find(d,'panel-bottom') is None; assert find(d,'panel-body')['header']['content']['mod']=='panel-tabs'" &&
+    ! head -n 1 "$APP/mods/auto-tabs/main.js" | grep -q 'herdr-kit' && [ ! -d "$APP/.auto-tabs-backup" ]
+}
+m2_check_fail() {
+  cp "$APP/mods/auto-tabs/main.js" "$CONTROL/auto-before"
+  cp "$APP/layouts/my-main.json" "$CONTROL/layout-before"
+  : > "$CONTROL/auto-check-fail"
+  run --panel-tabs
+  [ "$RC" -ne 0 ] && cmp -s "$CONTROL/auto-before" "$APP/mods/auto-tabs/main.js" &&
+    cmp -s "$CONTROL/layout-before" "$APP/layouts/my-main.json" &&
+    [ ! -f "$APP/mods/auto-tabs/config.js" ] && [ ! -d "$APP/.auto-tabs-backup" ] &&
+    [ "$(find "$APP/mods/auto-tabs" -type f | wc -l | tr -d ' ')" = 2 ]
+}
+m2_link_refusal() {
+  mkdir -p "$APP/mods/auto-tabs/nested"
+  printf 'existing\n' > "$CONTROL/link-target"
+  ln -s "$CONTROL/link-target" "$APP/mods/auto-tabs/nested/custom.js"
+  unchanged_refusal --panel-tabs && grep -q '링크' "$CONTROL/output"
+}
+setup2; report 'M2 kit swap + full-folder backup' m2_swap
+setup2; report 'M2 non-managed auto-tabs files are kept' m2_keep_nonmanaged
+setup2; report 'M2 names=true when old main.js has syncNames (and sticks)' m2_names_true
+setup2; report 'M2 names=false (kit main.js text with syncNames does not count)' m2_names_false
+setup2; report 'M2 hideFiles carried from old filter' m2_hide_from_old_filter
+setup2; report 'M2 hide/show flags rewrite config.js and both headers' m2_flags
+setup2; report 'M2 panel-bottom exact shape before status' m2_shape
+setup2; report 'M2 panel-bottom goes last without status' m2_shape_no_status
+setup2; report 'M2 reinstall idempotent, moved tool + state survive' m2_idempotent
+setup2; report 'M2 own panel-bottom: only header props fixed' m2_idempotent_fix_props
+setup2; report 'M2 foreign panel-bottom refused, M1 header kept' m2_foreign_bottom
+setup2; report 'M2 no work column skips bottom, M1 header kept' m2_no_work
+setup2; report 'M2 duplicate tool id refused, nothing changed' m2_dup
+setup2; report 'M2 files-plus in bottom not re-added, bottom opened' m2_files_plus_in_bottom
+setup2; report 'M2 step 4 opens right panel when files-plus is in panel-body' m2_open_right
+setup2; report 'F6 foreign panel-bottom files-plus skips select/show' m2_foreign_files_plus
+setup2; report 'M2 remove moves tools back, deletes panel-bottom, keeps kit' m2_remove
+setup2; report 'F2 remove colliding id refused, layout byte-equal' m2_remove_collision
+setup2; report 'M2 remove without any backup says none' m2_remove_backup_none
+setup2; report 'M2 install then remove is byte-equal to the backup' m2_bytes_equal
+setup2; report 'layout without auto-tabs block skips M2 (M1 only)' m2_no_auto_block
+setup2; report '0.1.17 skips M2 (M1 only)' m2_old_version
+setup2; report 'M2 check failure leaves auto-tabs and layout untouched' m2_check_fail
+setup2; report 'M2 nested symlink in auto-tabs refused' m2_link_refusal
 printf '%s PASS, %s FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

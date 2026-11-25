@@ -9,6 +9,13 @@
 #     header = {content:{mod:panel-tabs, props:{stack:panel-body, hideFiles:<bool>}}, height:32} · hideFiles = 같은 패처가 예측한 이번 실행 뒤 Files 상태(숨김=true · 보임=false · 변환 거절이면 현재 상태 · auto-tabs 없으면 false)
 #     panel-body 에 panel-tabs 가 아닌 header 가 이미 있으면 아무것도 바꾸기 전에 거절한다 · Herdr 앱 0.1.17 이상만(header 꼴을 0.1.17 에서 확인) · 그 레이아웃이 떠 있으면 쓴 뒤 `herdr-app status` 의 errors 에 layouts/<이름>.json 오류가 생기는지 2초 본다(생기면 사본으로 되돌리고 실패 · 안 떠 있으면 검사 못 함을 알림).
 #   (선택) --remove-panel-tabs: panel-body 의 header 가 panel-tabs 것일 때만 뺀다(사본 + 통째로 바꿔 끼우기). mod 를 복사하지 않고 auto-tabs · 패널 열기도 안 한다 · mods/panel-tabs 폴더는 그대로 둔다(place:none 이라 해가 없다) · --panel-tabs · --hide-files · --show-files 와 함께 못 쓴다.
+#   (선택) --panel-tabs 의 M2(옮기기 · 닫기 · 「+」): Herdr 0.1.18 이상 **이고** 대상 레이아웃에 content.mod 가 auto-tabs 인 블록이 있을 때만 돈다(아니면 한 줄 알림 뒤 위 M1 그대로).
+#     (a) kit 판 auto-tabs(저장소 mods/auto-tabs)로 바꿔 끼운다: 지금 폴더 통째 사본 .auto-tabs-backup/<시각>-<PID>/ → 숨긴 폴더 `herdr-app check` → 같은 게시 엔진. 관리 파일 = mod.json · main.js · owner.js · panels.js · names.js · config.js · win-*.svg · LICENSE-herdr-app (그 밖 파일은 그대로).
+#         config.js 는 설치기가 만든다: names = 옛 main.js 에 syncNames 가 있으면 true(옛 main.js 가 kit 판이면 옛 config.js 의 names) · hideFiles = 위 예측(옛 필터 · 옛 kit config · --hide-files/--show-files).
+#     (b) 레이아웃 work 열의 status 바로 앞(없으면 끝)에 아래 패널 스택 panel-bottom 을 더한다(우리 것이면 header props 만 맞춤 · 우리 것이 아니거나 work 열이 없으면 이 부분만 거절하고 M1 header 는 그대로 · 도구 id 가 panel-body 와 panel-bottom 양쪽에 있으면 아무것도 바꾸기 전에 거절). files-plus 블록은 레이아웃 어디에도 id 가 없을 때만 panel-body 에 더한다.
+#     (c) 4단계는 files-plus 가 있는 쪽(panel 또는 panel-bottom)을 연다.
+#     kit 판 auto-tabs 가 이미 깔려 있으면(첫 줄 `// herdr-kit auto-tabs 2`) 옛 단추·필터 패처는 건너뛰고 --hide-files/--show-files 는 config.js 와 두 스택 header 의 hideFiles 를 고친다(--panel-tabs 없이도).
+#   --remove-panel-tabs 는 panel-bottom(우리 것)의 도구를 순서대로 panel-body 끝으로 옮기고(id 가 겹치면 쓰기 전에 거절) panel-bottom 을 지운 뒤 panel-body header 도 뺀다. kit 판 auto-tabs 는 그대로 두고 옛 판 사본 경로(.auto-tabs-backup 의 가장 새 것)를 알린다.
 # 고치는 파일마다 먼저 사본을 둔다: layouts/<이름>.json.bak-files-plus-<시각>-<PID>(레이아웃 링크가 있는 폴더) · .main.js.bak-files-plus-<시각>-<PID>(실제 main.js 가 있는 폴더 = 보통 mods/auto-tabs/, main.js 가 링크면 링크가 가리키는 폴더)
 # [주의] 앱이 mod 폴더의 낯선 파일을 읽는지 모른다 → 링크 대상 폴더(다른 체크아웃일 수 있음)에도 사본을 두는 대신 «실제로 쓰는 파일 옆» 에 둔다.
 # 앱이 싣는 레이아웃(main · terminals · win98)은 고치지 않는다 — 앱이 다음 시작에 되돌린다. 복제본 이름을 준다.
@@ -67,9 +74,10 @@ if [ -n "$PANEL_TABS" ]; then
   PT_VER_RAW=$("$HERDR_APP" --version 2>/dev/null) || PT_VER_RAW=
   PT_VER_OK=$(printf %s "$PT_VER_RAW" | python3 -c 'import re, sys
 m = re.search(r"(\d+)\.(\d+)\.(\d+)", sys.stdin.read())
-print("?" if not m else ("ok" if tuple(map(int, m.groups())) >= (0, 1, 17) else "old"))' 2>/dev/null) || PT_VER_OK="?"
+v = tuple(map(int, m.groups())) if m else None
+print("?" if not m else ("ok18" if v >= (0, 1, 18) else "ok" if v >= (0, 1, 17) else "old"))' 2>/dev/null) || PT_VER_OK="?"
   case $PT_VER_OK in
-    ok) ;;
+    ok|ok18) ;;
     old) echo "herdr-app 이 너무 낮다($PT_VER_RAW) — --panel-tabs 는 0.1.17 이상만 확인했다. 앱을 올린 뒤 다시. 손댄 것 없음." >&2; exit 1 ;;
     *) echo "herdr-app 버전을 읽을 수 없다('$HERDR_APP --version' → «${PT_VER_RAW}») — --panel-tabs 는 0.1.17 이상만 확인했다. 손댄 것 없음." >&2; exit 1 ;;
   esac
@@ -443,10 +451,103 @@ ACTIVE=$(python3 -c 'import json, sys
 try: print(json.load(open(sys.argv[1], encoding="utf-8")).get("layout") or "")
 except Exception: print("")' "$APP/shared.json")
 LAYOUT=${LAYOUT_ARG:-${ACTIVE:-main}}
+# kit 판 auto-tabs 설정(config.js) 읽기·쓰기·names 판정 — 모드: read <config> · write <config> <names> <hide> · names <main.js> <config>
+# config.js 꼴(고정): [주석 한 줄] export default { names: <true|false>, hideFiles: <true|false> };
+cfg_py() {
+  python3 - "$@" <<'PY'
+import re, sys
+
+CFG = re.compile(r"\A(?://[^\n]*\n)?export default \{ names: (true|false), hideFiles: (true|false) \};\n?\Z")
+def read_cfg(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = CFG.match(f.read().replace("\r\n", "\n"))
+    except OSError:
+        return None
+    return m.groups() if m else None
+
+mode = sys.argv[1]
+if mode == "read":
+    g = read_cfg(sys.argv[2])
+    if g is None:
+        sys.exit(3)
+    print(g[0], g[1])
+elif mode == "write":
+    path, names, hide = sys.argv[2:5]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("// herdr-kit auto-tabs 설정 — install-mac.sh 가 쓴다(--hide-files · --show-files · 이름 동기화)\n")
+        f.write("export default { names: %s, hideFiles: %s };\n" % (names, hide))
+elif mode == "names":
+    main, cfg = sys.argv[2:4]
+    try:
+        with open(main, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        print("false"); sys.exit(0)
+    if text.startswith("// herdr-kit auto-tabs 2"):        # kit 판: 옛 config.js 의 names 만 본다(main.js 글에는 syncNames 가 늘 있다)
+        g = read_cfg(cfg)
+        print("true" if g and g[0] == "true" else "false")
+    else:
+        print("true" if "syncNames" in text else "false")
+PY
+}
+
+# 레이아웃에 content.mod 가 auto-tabs 인 블록이 있나: yes · no · err(못 읽음)
+gate_py() {
+  python3 - "$1" <<'PY'
+import json, sys
+
+def has(node):
+    if isinstance(node, dict):
+        c = node.get("content")
+        if isinstance(c, dict) and c.get("mod") == "auto-tabs":
+            return True
+        return any(has(v) for v in node.values())
+    if isinstance(node, list):
+        return any(has(v) for v in node)
+    return False
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        print("yes" if has(json.load(f)) else "no")
+except Exception:
+    print("err")
+PY
+}
+
+# 지금 깔린 auto-tabs 가 kit 판인가(main.js 첫 줄 표식)
+KIT_NOW=
+if [ -f "$APP/mods/auto-tabs/main.js" ]; then
+  case $(head -n 1 "$APP/mods/auto-tabs/main.js" 2>/dev/null) in
+    "// herdr-kit auto-tabs 2"*) KIT_NOW=1 ;;
+  esac
+fi
+# M2 문: --panel-tabs 이고 Herdr 0.1.18 이상이고 레이아웃에 content.mod 가 auto-tabs 인 블록이 있을 때만(아니면 한 줄 알림 뒤 M1 그대로).
+M2=
+if [ -n "$PANEL_TABS" ]; then
+  if [ "$PT_VER_OK" != ok18 ]; then
+    echo "Herdr 0.1.18 미만 — 옮기기·닫기·+ 는 꺼짐"
+  else
+    M2_GATE=$(gate_py "$APP/layouts/$LAYOUT.json") || M2_GATE=err
+    case $M2_GATE in
+      yes) M2=1 ;;
+      no) echo "위쪽 바가 auto-tabs 가 아니라 옮기기·닫기·+ 는 꺼짐(M1 탭 줄만)" ;;
+    esac
+  fi
+fi
 # 요청이 거절될 수 있으므로 같은 패처로 읽기 전용 예측 → 거절 · 불명은 현재 상태 유지.
 PT_HIDE=false
 PT_BEFORE=false
-if [ -n "$PANEL_TABS" ] && [ -f "$APP/mods/auto-tabs/main.js" ]; then
+KIT_CFG=            # kit 판이 이미 있고 M2 가 아닐 때 --hide-files/--show-files 는 config.js 와 header 만 고친다
+KIT_SYNC=           # kit 판 + 플래그: 두 스택 header 의 hideFiles 도 맞춘다
+if [ -z "$REMOVE_PT" ] && [ -n "$KIT_NOW" ] && { [ -n "$PANEL_TABS" ] || [ -n "$FILES_MODE" ]; }; then
+  KIT_CFG_RAW=$(cfg_py read "$APP/mods/auto-tabs/config.js" 2>/dev/null) || { echo "auto-tabs: config.js 모양이 kit 판 꼴이 아니다($APP/mods/auto-tabs/config.js) — 덮어쓰지 않으려고 멈췄다. 손댄 것 없음." >&2; exit 1; }
+  PT_HIDE=${KIT_CFG_RAW#* }
+  PT_BEFORE=$PT_HIDE
+  case $FILES_MODE in hide-files) PT_HIDE=true ;; show-files) PT_HIDE=false ;; esac
+  [ -n "$M2" ] || [ -z "$FILES_MODE" ] || KIT_CFG=1
+  [ -z "$FILES_MODE" ] || KIT_SYNC=1
+elif [ -n "$PANEL_TABS" ] && [ -f "$APP/mods/auto-tabs/main.js" ]; then
   PT_PROBE=$(autotabs_py "$APP/mods/auto-tabs/main.js" probe - 2>/dev/null) || true
   case $PT_PROBE in *probe:hidden*) PT_HIDE=true ;; esac
   PT_BEFORE=$PT_HIDE
@@ -456,11 +557,16 @@ if [ -n "$PANEL_TABS" ] && [ -f "$APP/mods/auto-tabs/main.js" ]; then
       case $PT_PREDICT in *files:hidden-custom*) ;; *) PT_HIDE=true ;; esac ;;
     *files:shown-already*|*files:shown*) PT_HIDE=false ;;
   esac
+elif [ -n "$M2" ]; then
+  [ "$FILES_MODE" != hide-files ] || PT_HIDE=true      # 옛 main.js 가 없다: 플래그만
 fi
-python3 - "$APP" "$LAYOUT" "$HERDR_APP_Q" "$FILES_MODE" "$REPO/files-plus" "$PT_MODE" "$PT_HIDE" "$REPO/panel-tabs" "$HERDR_APP" <<'PY'
+# M2 또는 kit 판이 있으면 옛 단추·필터 패처(autotabs_py)는 건너뛴다.
+KIT_MODE=
+[ -z "$M2$KIT_NOW" ] || KIT_MODE=1
+python3 - "$APP" "$LAYOUT" "$HERDR_APP_Q" "$FILES_MODE" "$REPO/files-plus" "$PT_MODE" "$PT_HIDE" "$REPO/panel-tabs" "$HERDR_APP" "$M2" "$KIT_MODE" "$REPO/auto-tabs" <<'PY'
 import filecmp, json, os, re, stat, subprocess, sys, time
 
-app, name, herdr, files_mode, repo, pt_mode, pt_hide, pt_repo, herdr_bin = sys.argv[1:10]
+app, name, herdr, files_mode, repo, pt_mode, pt_hide, pt_repo, herdr_bin, m2, kit_mode, at_repo = sys.argv[1:13]
 want_hide = pt_hide == "true"
 if not name or name in {".", ".."} or os.path.basename(name) != name:
     sys.exit("레이아웃 이름에 경로를 쓸 수 없다")
@@ -533,7 +639,7 @@ if pt_mode != "remove" and isinstance(body, dict) and body.get("type") == "stack
         bad = mods[0].get("id")
         sys.exit(f"레이아웃 {name}: files-plus mod 블록의 id 가 «{bad}» 다 — 탭바 단추와 자동 열기는 id «files-plus» 로 찾아 동작하지 않는다.\n"
                  f"  {path} 에서 그 블록의 id 를 «files-plus» 로 바꾼 뒤 다시 돌린다. 손댄 것 없음.")
-    need_layout = not any(c.get("id") == "files-plus" for c in mods)
+    need_layout = find(layout, "files-plus") is None      # id files-plus 가 레이아웃 어디에도 없을 때만 더한다(panel-bottom 에 있으면 그대로)
 else:
     need_layout = False
 # panel-tabs header: 설치 = 더하기 · 고치기가 필요한가 / panel-tabs 가 아닌 header 가 있으면 아무것도 바꾸기 전에 거절한다. 제거 = 우리 header 가 있을 때만 쓴다.
@@ -555,6 +661,30 @@ if pt_mode == "install":
     need_header = header_differs(cur_header, want_hide)
 elif pt_mode == "remove":
     need_remove = isinstance(body, dict) and ours_header(body.get("header"))
+    _rb = find(layout, "panel-bottom")
+    need_remove = need_remove or (isinstance(_rb, dict) and _rb.get("type") == "stack" and ours_header(_rb.get("header")))
+TOOL_IDS = ("files", "files-plus", "changes", "graph")
+def stack_ids(node):
+    return {c.get("id") for c in (node.get("children") or []) if isinstance(c, dict)} if isinstance(node, dict) and isinstance(node.get("children"), list) else set()
+# M2: 같은 도구 id 가 오른쪽 · 아래 스택에 둘 다 있으면 어느 쪽이 맞는지 모른다 → 아무것도 바꾸기 전에 거절한다.
+bottom = find(layout, "panel-bottom")
+if pt_mode == "remove" and isinstance(bottom, dict) and bottom.get("type") == "stack" and ours_header(bottom.get("header")):
+    if isinstance(body, dict) and body.get("type") == "stack":
+        for c in bottom.get("children") or []:
+            if isinstance(c, dict) and c.get("id") in stack_ids(body):
+                sys.exit(f"레이아웃 {name}: id {c.get('id')} 가 panel-body 와 panel-bottom 양쪽에 있다 — 손으로 고친다. 손댄 것 없음.")
+need_m2 = False
+if m2 and pt_mode == "install":
+    dup = sorted((stack_ids(body) & stack_ids(bottom)) & set(TOOL_IDS))
+    if dup:
+        sys.exit(f"레이아웃 {name}: 도구 id {', '.join(dup)} 가 panel-body 와 panel-bottom 양쪽에 있다 — 어느 쪽이 맞는지 알 수 없어 멈췄다. {path} 에서 한쪽만 남긴 뒤 다시 돌린다. 손댄 것 없음.")
+    _work = find(layout, "work")
+    _ours = isinstance(bottom, dict) and bottom.get("type") == "stack" and ours_header(bottom.get("header"))
+    if bottom is None:
+        need_m2 = isinstance(_work, dict) and _work.get("type") == "column" and isinstance(_work.get("children"), list)
+    elif _ours:
+        _p = bottom["header"]["content"].get("props")
+        need_m2 = not (isinstance(_p, dict) and _p.get("stack") == "panel-bottom" and _p.get("hideFiles") is want_hide and bottom["header"].get("height") == 32)
 # [주의] 이미 거절된 현재 레이아웃은 먼저 고친다 — mod 게시 · 청소보다 앞에서 멈춘다.
 if pt_mode:
     try:
@@ -577,6 +707,27 @@ if pt_mode == "install":
             st = os.lstat(p)
             if stat.S_ISLNK(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_nlink > 1):
                 sys.exit(f"[경고] panel-tabs 기존 파일이 심볼릭 링크 또는 하드링크다: {p} — 링크를 고친 뒤 다시 돌린다. 손댄 것 없음.")
+# [주의] M2: kit 판 auto-tabs 를 바꿔 끼우므로 panel-tabs 와 같은 규칙으로 링크 · 하드링크를 거절한다. 저장소 쪽 파일도 아무것도 바꾸기 전에 본다.
+if m2 and pt_mode == "install":
+    at_live = os.path.join(app, "mods", "auto-tabs")
+    if os.path.islink(at_live):
+        sys.exit(f"[경고] mods/auto-tabs 가 심볼릭 링크다({at_live}) — 링크가 가리키는 폴더를 덮어쓰지 않으려고 멈췄다. 손댄 것 없음.")
+    for base, dirs, names in os.walk(at_live):
+        for entry in dirs + names:
+            p = os.path.join(base, entry)
+            st = os.lstat(p)
+            if stat.S_ISLNK(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_nlink > 1):
+                sys.exit(f"[경고] auto-tabs 기존 파일이 심볼릭 링크 또는 하드링크다: {p} — 링크를 고친 뒤 다시 돌린다. 손댄 것 없음.")
+    _mj, _mm = os.path.join(at_repo, "mod.json"), os.path.join(at_repo, "main.js")
+    try:
+        with open(_mm, encoding="utf-8") as f:
+            _first = f.readline()
+    except OSError:
+        _first = None
+    if not os.path.isfile(_mj) or _first is None:
+        sys.exit(f"저장소에 mods/auto-tabs(mod.json · main.js)가 없다: {at_repo} — 저장소를 새로 받는다. 손댄 것 없음.")
+    if not _first.startswith("// herdr-kit auto-tabs 2"):
+        sys.exit(f"저장소 mods/auto-tabs/main.js 첫 줄이 kit 표식(// herdr-kit auto-tabs 2)이 아니다 — 저장소를 새로 받는다. 손댄 것 없음.")
 # 점검: 쓸 폴더 · 고칠 «파일» 을 아무것도 바꾸기 전에 본다(traceback 없이). 폴더 = 레이아웃 링크 폴더 · 실제 파일 폴더 · 실제 main.js 폴더 · 바뀔 mods/files-plus 파일의 폴더. 파일 = 레이아웃 실제 파일 · (단추를 더해야 하면) main.js 실제 파일 · 바뀔 mods/files-plus 파일(잠금 플래그만 — 바꿔 끼우기는 읽기 전용 파일도 된다).
 def file_block(p, need_w=True):
     try:
@@ -626,12 +777,12 @@ if pt_changed:
         checks.append(nearest_dir(os.path.dirname(dst)))
         if os.path.isfile(dst):
             file_checks.append((dst, False))
-if need_layout or need_header or need_remove:
+if need_layout or need_header or need_remove or need_m2 or (kit_mode and files_mode):
     checks += [os.path.dirname(path), os.path.dirname(os.path.realpath(path))]
     file_checks.append((os.path.realpath(path), True))
 sweeps = [os.path.dirname(path), os.path.dirname(os.path.realpath(path))]
 tabs_js = os.path.join(app, "mods", "auto-tabs", "main.js")
-if pt_mode != "remove" and os.path.isfile(tabs_js):
+if pt_mode != "remove" and not kit_mode and os.path.isfile(tabs_js):
     tabs_dir = os.path.dirname(os.path.realpath(tabs_js))
     sweeps.append(tabs_dir)
     try:
@@ -817,6 +968,40 @@ if [ -n "$PANEL_TABS" ]; then
     export FP_NOTE
   fi
 fi
+# kit 판 auto-tabs: M2 = 저장소 판으로 바꿔 끼움(관리 파일만 · 그 밖 파일은 그대로) / kit 판이 이미 있고 --hide-files · --show-files = config.js 만 고침.
+# [주의] 레이아웃(2단계)보다 먼저 한다 — check 가 떨어지면 레이아웃은 손대지 않은 채 멈춘다. hideFiles 는 예측값($PT_HIDE)을 config.js 에 그대로 써서 header 와 어긋나지 않는다.
+if [ -n "$M2" ] || [ -n "$KIT_CFG" ]; then
+  TABS_STAGE=$(mktemp -d "$APP/.auto-tabs-stage.XXXXXX") || late_fail $?
+  if [ -n "$M2" ]; then
+    for _f in mod.json main.js owner.js panels.js names.js config.js win-close.svg win-max.svg win-min.svg win-restore.svg LICENSE-herdr-app; do
+      [ ! -f "$REPO/auto-tabs/$_f" ] || cp "$REPO/auto-tabs/$_f" "$TABS_STAGE/$_f" || late_fail $?
+    done
+    if [ -f "$APP/mods/auto-tabs/main.js" ]; then
+      AT_NAMES=$(cfg_py names "$APP/mods/auto-tabs/main.js" "$APP/mods/auto-tabs/config.js")
+    else
+      AT_NAMES=false
+    fi
+  else
+    # [주의] -p 를 쓰지 않는다(잠금 플래그가 임시 폴더로 옮겨 가 치우지 못한다). 링크는 내용으로 복사한다.
+    cp -RL "$APP/mods/auto-tabs/." "$TABS_STAGE/" || { echo "auto-tabs: 검사용 사본을 만들지 못했다 — $FP_NOTE" >&2; late_fail 1; }
+    AT_NAMES=$(cfg_py names "$APP/mods/auto-tabs/main.js" "$APP/mods/auto-tabs/config.js")
+  fi
+  cfg_py write "$TABS_STAGE/config.js" "$AT_NAMES" "$PT_HIDE" || late_fail $?
+  if ! "$HERDR_APP" check "$TABS_STAGE"; then
+    echo "auto-tabs: check 가 떨어져 손대지 않았다 — $FP_NOTE" >&2
+    late_fail 1
+  fi
+  publish_mod auto-tabs "$TABS_STAGE" "$TABS_STAGE" .auto-tabs-backup mod.json main.js || late_fail $?
+  if [ -e "$TABS_STAGE/.changed" ]; then
+    CHANGED_LIST="$CHANGED_LIST mods/auto-tabs 갱신됨(원본 폴더 통째 사본 $APP/.auto-tabs-backup/$TS-$$);"
+    AT_MSG="앞 단계에서 mods/auto-tabs 는 이미 갱신됨(원본 폴더 통째 사본 $APP/.auto-tabs-backup/$TS-$$)"
+    if [ "$FP_NOTE" = "바뀐 것 없음" ]; then FP_NOTE=$AT_MSG; else FP_NOTE="$FP_NOTE · $AT_MSG"; fi
+    export FP_NOTE
+    echo "auto-tabs: kit 판으로 갱신했다(names=$AT_NAMES hideFiles=$PT_HIDE · 옛 폴더 사본 $APP/.auto-tabs-backup/$TS-$$)"
+  else
+    echo "auto-tabs: kit 판이 이미 같다(names=$AT_NAMES hideFiles=$PT_HIDE)"
+  fi
+fi
 LAYOUT_MARK="$STAGE/.layout-changed"
 else
   # 제거 모드: mod 는 건드리지 않는다. 레이아웃 변경 표시만 둘 임시 폴더.
@@ -827,10 +1012,10 @@ export LAYOUT_MARK
 
 # 2. 레이아웃: files-plus 블록 + (--panel-tabs) panel-body header 추가/수정 · (--remove-panel-tabs) header 제거 — 한 번에 계산해 한 번만 저장한다(사본 하나).
 layout_py() {
-python3 - "$APP" "$LAYOUT" "$TS-$$" "$HERDR_APP_Q" "$1" "$2" "$HERDR_APP" <<'PY'
+python3 - "$APP" "$LAYOUT" "$TS-$$" "$HERDR_APP_Q" "$1" "$2" "$HERDR_APP" "${3-}" "${4-}" <<'PY'
 import json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time
 
-app, name, ts, herdr, pt_mode, pt_hide, herdr_bin = sys.argv[1:8]
+app, name, ts, herdr, pt_mode, pt_hide, herdr_bin, m2, sync = sys.argv[1:10]
 want_hide = pt_hide == "true"
 link = os.path.join(app, "layouts", name + ".json")
 path = os.path.realpath(link)          # 링크면 가리키는 실제 파일에 쓴다(링크는 그대로 · 모드·줄 끝 유지)
@@ -857,9 +1042,36 @@ def header_differs(h, hide):
     props = h["content"].get("props")
     return not (isinstance(props, dict) and props.get("stack") == "panel-body" and props.get("hideFiles") is hide and h.get("height") == 32)
 
-items = []                             # 이번에 바꾼 것: block · header-add · header-update · header-remove (변경 표시 파일에 한 줄씩)
+TOOL_IDS = ("files", "files-plus", "changes", "graph")
+def remove_node(node, id_):
+    # id 가 id_ 인 자식을 부모 children 에서 뺀다(첫 것만).
+    if isinstance(node, dict) and isinstance(node.get("children"), list):
+        for i, c in enumerate(node["children"]):
+            if isinstance(c, dict) and c.get("id") == id_:
+                del node["children"][i]
+                return True
+            if remove_node(c, id_):
+                return True
+    return False
+def ours_stack(node):
+    return isinstance(node, dict) and node.get("type") == "stack" and ours_header(node.get("header"))
+def set_props(node, stack_id, hide):
+    # 우리 header 의 stack · hideFiles · height 만 맞춘다(다른 키 · 순서는 그대로). 바뀌었으면 True.
+    h = node["header"]
+    if not isinstance(h["content"].get("props"), dict):
+        h["content"]["props"] = {}
+    p = h["content"]["props"]
+    if p.get("stack") == stack_id and p.get("hideFiles") is hide and h.get("height") == 32:
+        return False
+    p["stack"] = stack_id
+    p["hideFiles"] = hide
+    h["height"] = 32
+    return True
+
+items = []                             # 이번에 바꾼 것: block · header-add · header-update · header-remove · bottom-add · bottom-update · bottom-remove (변경 표시 파일에 한 줄씩)
 hide_txt = "true" if want_hide else "false"
 body = find(root, "panel-body")
+bottom = find(root, "panel-bottom")
 if pt_mode == "repair":
     # auto-tabs 실패: 이번에 쓴 header 의 Files 값만 실행 전 상태로 되돌린다.
     h = body.get("header") if isinstance(body, dict) else None
@@ -868,12 +1080,30 @@ if pt_mode == "repair":
         sys.exit(f"{path}: 복구할 panel-tabs header props 가 없다")
     props["hideFiles"] = want_hide
 elif pt_mode == "remove":
-    # 제거: 우리 header(content.mod == panel-tabs)일 때만 뺀다. 그 밖(없음 · 다른 header)은 손대지 않는다.
-    if not (isinstance(body, dict) and ours_header(body.get("header"))):
-        print(f"레이아웃 {name}: panel-tabs header 없음, 바뀐 것 없음")
+    # 제거: 우리 것(panel-bottom = stack + panel-tabs header · panel-body header = content.mod panel-tabs)만 건드린다. 그 밖(없음 · 다른 header)은 손대지 않는다.
+    if ours_stack(bottom):
+        if not (isinstance(body, dict) and body.get("type") == "stack"):
+            print(f"레이아웃 {name}: panel-body 스택이 없어 panel-bottom 의 도구를 옮길 곳이 없다 — panel-bottom 은 그대로 둔다")
+        else:
+            if body.get("children") is None:
+                body["children"] = []
+            if not isinstance(body["children"], list):
+                sys.exit(f"{path}: panel-body 의 children 이 목록이 아니다 — 손으로 고친다")
+            have = {c.get("id") for c in body["children"] if isinstance(c, dict)}
+            for c in bottom.get("children") or []:
+                if isinstance(c, dict):
+                    if c.get("id") in have:
+                        sys.exit(f"레이아웃 {name}: id {c.get('id')} 가 panel-body 와 panel-bottom 양쪽에 있다 — 손으로 고친다. 손댄 것 없음.")
+                    have.add(c.get("id"))
+                body["children"].append(c)
+            remove_node(root, "panel-bottom")
+            items.append("bottom-remove")
+    if isinstance(body, dict) and ours_header(body.get("header")):
+        del body["header"]
+        items.append("header-remove")
+    if not items:
+        print(f"레이아웃 {name}: panel-tabs header · panel-bottom 없음, 바뀐 것 없음")
         sys.exit(0)
-    del body["header"]
-    items.append("header-remove")
 else:
     if not body or body.get("type") != "stack":
         sys.exit(f"{path} 에 오른쪽 패널 스택(id panel-body)이 없다. 손으로 연다:\n"
@@ -883,14 +1113,10 @@ else:
     kids = body["children"]
     if not isinstance(kids, list):
         sys.exit(f"{path}: panel-body 의 children 이 목록이 아니다 — 손으로 고친다")
-    dicts = [c for c in kids if isinstance(c, dict)]       # 사용자가 넣은 이상한 항목(문자열 등)은 건너뛴다
-    if any((c.get("content") or {}).get("mod") == "files-plus" and c.get("id") == "files-plus" for c in dicts):
+    # files-plus 블록은 id «files-plus» 가 레이아웃 어디에도 없을 때만 panel-body 에 더한다(panel-bottom 안에 있으면 그대로).
+    if find(root, "files-plus"):
         print(f"레이아웃 {name}: files-plus 블록이 이미 있다")
-        if not pt_mode:
-            sys.exit(0)
     else:
-        if find(root, "files-plus"):
-            sys.exit(f"{path} 에 id «files-plus» 가 다른 곳에 이미 있다 — 손으로 고친다")
         at = next((i + 1 for i, c in enumerate(kids) if isinstance(c, dict) and c.get("id") == "files"), len(kids))
         kids.insert(at, {"id": "files-plus", "type": "block", "content": {"mod": "files-plus"}})
         items.append("block")
@@ -902,15 +1128,34 @@ else:
             body["header"] = {"content": {"mod": "panel-tabs", "props": {"stack": "panel-body", "hideFiles": want_hide}}, "height": 32}
             items.append("header-add")
         elif header_differs(cur, want_hide):
-            # 우리 header: 바뀐 값만 고친다(다른 키 · 순서는 그대로)
-            if not isinstance(cur["content"].get("props"), dict):
-                cur["content"]["props"] = {}
-            cur["content"]["props"]["stack"] = "panel-body"
-            cur["content"]["props"]["hideFiles"] = want_hide
-            cur["height"] = 32
+            set_props(body, "panel-body", want_hide)
             items.append("header-update")
         else:
             print(f"레이아웃 {name}: panel-tabs header 가 이미 있다(hideFiles={hide_txt})")
+        if m2 == "1":
+            # M2: 아래 패널 스택 panel-bottom. 도구 id 가 두 스택에 겹치면 2단계 앞(점검)에서 이미 거절했다.
+            work = find(root, "work")
+            if bottom is not None and not ours_stack(bottom):
+                print(f"레이아웃 {name}: id panel-bottom 이 이미 있는데 우리 것(stack + panel-tabs header)이 아니라 아래 패널은 건너뛴다 — 옮기기·닫기·+ 는 오른쪽 패널만(M1 header 는 그대로)")
+            elif bottom is None and not (isinstance(work, dict) and work.get("type") == "column" and isinstance(work.get("children"), list)):
+                print(f"레이아웃 {name}: work 열(id work · column)이 없어 아래 패널(panel-bottom)은 건너뛴다 — 옮기기·닫기·+ 는 오른쪽 패널만(M1 header 는 그대로)")
+            elif bottom is None:
+                node = {"id": "panel-bottom", "type": "stack", "size": {"px": 240}, "hidden": True, "children": [],
+                        "header": {"content": {"mod": "panel-tabs", "props": {"stack": "panel-bottom", "hideFiles": want_hide}}, "height": 32}}
+                wk = work["children"]
+                at = next((i for i, c in enumerate(wk) if isinstance(c, dict) and c.get("id") == "status"), len(wk))
+                wk.insert(at, node)
+                items.append("bottom-add")
+            elif set_props(bottom, "panel-bottom", want_hide):
+                items.append("bottom-update")
+    if sync == "1":
+        # kit 판 auto-tabs + --hide-files/--show-files: 우리 header 가 있는 스택의 hideFiles 를 config.js 와 맞춘다.
+        for node, sid in ((body, "panel-body"), (bottom, "panel-bottom")):
+            if ours_stack(node) and isinstance(node["header"]["content"].get("props"), dict) \
+                    and node["header"]["content"]["props"].get("hideFiles") is not want_hide:
+                node["header"]["content"]["props"]["hideFiles"] = want_hide
+                if "header-update" not in items:
+                    items.append("header-update")
     if not items:
         sys.exit(0)
 backup = os.path.join(os.path.dirname(link), os.path.basename(link) + f".bak-files-plus-{ts}")
@@ -1053,9 +1298,15 @@ if "header-update" in items:
     print(f"레이아웃 {name}: panel-tabs header 를 고쳤다(hideFiles={hide_txt})")
 if "header-remove" in items:
     print(f"레이아웃 {name}: panel-body 에서 panel-tabs header 를 뺐다")
+if "bottom-add" in items:
+    print(f"레이아웃 {name}: work 열에 아래 패널 panel-bottom 을 더했다(hideFiles={hide_txt})")
+if "bottom-update" in items:
+    print(f"레이아웃 {name}: panel-bottom header 를 고쳤다(hideFiles={hide_txt})")
+if "bottom-remove" in items:
+    print(f"레이아웃 {name}: panel-bottom 의 도구를 panel-body 끝으로 옮기고 panel-bottom 을 지웠다")
 PY
 }
-layout_py "$PT_MODE" "$PT_HIDE" || late_fail $?
+layout_py "$PT_MODE" "$PT_HIDE" "$M2" "$KIT_SYNC" || late_fail $?
 if [ -e "$LAYOUT_MARK" ]; then
   LAYOUT_DESC=
   for _it in $(cat "$LAYOUT_MARK"); do
@@ -1064,6 +1315,9 @@ if [ -e "$LAYOUT_MARK" ]; then
       header-add) _ds="panel-tabs header 추가" ;;
       header-update) _ds="panel-tabs header 갱신" ;;
       header-remove) _ds="panel-tabs header 제거" ;;
+      bottom-add) _ds="panel-bottom 추가" ;;
+      bottom-update) _ds="panel-bottom header 갱신" ;;
+      bottom-remove) _ds="panel-bottom 제거(도구는 panel-body 로)" ;;
       *) _ds= ;;
     esac
     [ -z "$_ds" ] || LAYOUT_DESC="${LAYOUT_DESC:+$LAYOUT_DESC · }$_ds"
@@ -1075,6 +1329,9 @@ fi
 
 # --remove-panel-tabs 는 여기서 끝: mod 복사 · auto-tabs · 패널 열기(4단계) 모두 하지 않는다.
 if [ -n "$REMOVE_PT" ]; then
+  AT_BACKUP=$(ls -1d "$APP"/.auto-tabs-backup/*/ 2>/dev/null | sort | tail -n 1 || true)
+  AT_BACKUP=${AT_BACKUP%/}
+  echo "kit 판 auto-tabs 는 그대로 둔다 — 옛 판 사본: ${AT_BACKUP:-없음}"
   [ ! -e "$LAYOUT_MARK" ] || echo "mods/panel-tabs 폴더는 그대로 둔다 — mod.json 이 place:none 이라 화면에 붙지 않는다(폴더까지 지우려면 $APP/mods/panel-tabs 를 지운다)"
   exit 0
 fi
@@ -1098,7 +1355,9 @@ auto_tabs_fail() {
 
 # 3. auto-tabs 탭바: «Files+» 단추 · (선택) 기본 Files 숨김/보임
 TABS_DIR="$APP/mods/auto-tabs"
-if [ -f "$TABS_DIR/main.js" ]; then
+if [ -n "$KIT_MODE" ]; then
+  :   # kit 판(M2 로 방금 깔았거나 이미 깔려 있음): 옛 «Files+» 단추 · Files 필터 패처는 건너뛴다 — 단추 · 숨김은 kit 판 main.js 와 config.js 가 맡는다.
+elif [ -f "$TABS_DIR/main.js" ]; then
   TABS_STAGE=$(mktemp -d "$APP/.auto-tabs-stage.XXXXXX") || { rc=$?; [ -z "$PANEL_TABS" ] && exit "$rc"; auto_tabs_fail "$rc"; }
   # [주의] -p 를 쓰지 않는다: -p 는 잠금 플래그(uchg)까지 임시 폴더로 옮겨 치우지 못하게 만든다. 모드는 최종 쓰기에서 원본(copymode)을 따른다.
   cp -RL "$TABS_DIR/." "$TABS_STAGE/" || { echo "auto-tabs: 검사용 사본을 만들지 못했다(읽을 수 없는 파일?) — $FP_NOTE" >&2; auto_tabs_fail 1; }   # 링크는 내용으로 복사한다(검사는 실제 내용으로)
@@ -1163,13 +1422,45 @@ else
   [ -z "$FILES_MODE" ] || echo "auto-tabs 가 없어 --$FILES_MODE 는 건너뛴다(auto-tabs 레이아웃에서만 듣는다)" >&2
 fi
 
-# 4. 지금 떠 있는 레이아웃이면 패널을 files-plus 로 연다
-if [ "$LAYOUT" = "$ACTIVE" ]; then
+# 4. 지금 떠 있는 레이아웃이면 패널을 files-plus 로 연다 — files-plus 가 있는 쪽(오른쪽 panel-body · 아래 panel-bottom)을 연다.
+OPEN_STACK=$(python3 - "$APP/layouts/$LAYOUT.json" <<'PY' 2>/dev/null
+import json, sys
+
+def find(node, id_):
+    if isinstance(node, dict):
+        if node.get("id") == id_:
+            return node
+        for child in node.get("children") or []:
+            hit = find(child, id_)
+            if hit:
+                return hit
+
+def ours_stack(node):
+    h = node.get("header") if isinstance(node, dict) else None
+    return isinstance(node, dict) and node.get("type") == "stack" and isinstance(h, dict) and isinstance(h.get("content"), dict) and h["content"].get("mod") == "panel-tabs"
+
+def has_files(node):
+    return isinstance(node, dict) and node.get("type") == "stack" and any(isinstance(c, dict) and c.get("id") == "files-plus" for c in node.get("children") or [])
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        root = json.load(f)
+    b = find(root, "panel-bottom")
+    print("panel-bottom" if ours_stack(b) and has_files(b) else "panel-body" if has_files(find(root, "panel-body")) else "")
+except Exception:
+    print("")
+PY
+) || OPEN_STACK=
+OPEN_VIS=panel
+[ "$OPEN_STACK" != panel-bottom ] || OPEN_VIS=panel-bottom
+if [ -z "$OPEN_STACK" ]; then
+  echo "files-plus 가 있는 관리 패널 없음 — 열기 건너뜀"
+elif [ "$LAYOUT" = "$ACTIVE" ]; then
   # 방금 레이아웃 파일을 고쳤다 → 앱이 다시 읽는 사이에는 select 가 실패할 수 있다: 몇 번 짧게 다시 해 본다.
   opened=
   for try in 1 2 3 4 5 6; do
-    if "$HERDR_APP" do layout.select '{"stack":"panel-body","child":"files-plus"}' >/dev/null 2>&1 \
-      && "$HERDR_APP" do layout.show '{"id":"panel"}' >/dev/null 2>&1; then opened=1; break; fi
+    if "$HERDR_APP" do layout.select "{\"stack\":\"$OPEN_STACK\",\"child\":\"files-plus\"}" >/dev/null 2>&1 \
+      && "$HERDR_APP" do layout.show "{\"id\":\"$OPEN_VIS\"}" >/dev/null 2>&1; then opened=1; break; fi
     sleep 0.5
   done
   if [ -n "$opened" ]; then
