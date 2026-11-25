@@ -10,7 +10,7 @@
 #     panel-body 에 panel-tabs 가 아닌 header 가 이미 있으면 아무것도 바꾸기 전에 거절한다 · Herdr 앱 0.1.17 이상만(header 꼴을 0.1.17 에서 확인) · 그 레이아웃이 떠 있으면 쓴 뒤 `herdr-app status` 의 errors 에 layouts/<이름>.json 오류가 생기는지 2초 본다(생기면 사본으로 되돌리고 실패 · 안 떠 있으면 검사 못 함을 알림).
 #   (선택) --remove-panel-tabs: panel-body 의 header 가 panel-tabs 것일 때만 뺀다(사본 + 통째로 바꿔 끼우기). mod 를 복사하지 않고 auto-tabs · 패널 열기도 안 한다 · mods/panel-tabs 폴더는 그대로 둔다(place:none 이라 해가 없다) · --panel-tabs · --hide-files · --show-files 와 함께 못 쓴다.
 #   (선택) --panel-tabs 의 M2(옮기기 · 닫기 · 「+」): Herdr 0.1.18 이상 **이고** 대상 레이아웃에 content.mod 가 auto-tabs 인 블록이 있을 때만 돈다(아니면 한 줄 알림 뒤 위 M1 그대로).
-#     (a) kit 판 auto-tabs(저장소 mods/auto-tabs)로 바꿔 끼운다: 지금 폴더 통째 사본 .auto-tabs-backup/<시각>-<PID>/ → 숨긴 폴더 `herdr-app check` → 같은 게시 엔진. 관리 파일 = mod.json · main.js · owner.js · panels.js · names.js · config.js · win-*.svg · panel-right.svg · panel-bottom.svg · LICENSE-herdr-app (그 밖 파일은 그대로).
+#     (a) kit 판 auto-tabs(저장소 mods/auto-tabs)로 바꿔 끼운다: 지금 폴더 통째 사본 .auto-tabs-backup/<시각>-<PID>/ → 숨긴 폴더 `herdr-app check` → 같은 게시 엔진. 관리 파일 = mod.json · main.js · owner.js · panels.js · names.js · config.js · win-*.svg · LICENSE-herdr-app (그 밖 파일은 그대로).
 #         config.js 는 설치기가 만든다: names = 옛 main.js 에 syncNames 가 있으면 true(옛 main.js 가 kit 판이면 옛 config.js 의 names) · hideFiles = 위 예측(옛 필터 · 옛 kit config · --hide-files/--show-files).
 #     (b) 레이아웃 work 열의 status 바로 앞(없으면 끝)에 아래 패널 스택 panel-bottom 을 더한다(우리 것이면 header props 만 맞춤 · 우리 것이 아니거나 work 열이 없으면 이 부분만 거절하고 M1 header 는 그대로 · 도구 id 가 panel-body 와 panel-bottom 양쪽에 있으면 아무것도 바꾸기 전에 거절). files-plus 블록은 레이아웃 어디에도 id 가 없을 때만 panel-body 에 더한다.
 #     (c) 4단계는 files-plus 가 있는 쪽(panel 또는 panel-bottom)을 연다.
@@ -973,7 +973,7 @@ fi
 if [ -n "$M2" ] || [ -n "$KIT_CFG" ]; then
   TABS_STAGE=$(mktemp -d "$APP/.auto-tabs-stage.XXXXXX") || late_fail $?
   if [ -n "$M2" ]; then
-    for _f in mod.json main.js owner.js panels.js names.js config.js win-close.svg win-max.svg win-min.svg win-restore.svg panel-right.svg panel-bottom.svg LICENSE-herdr-app; do
+    for _f in mod.json main.js owner.js panels.js names.js config.js win-close.svg win-max.svg win-min.svg win-restore.svg LICENSE-herdr-app; do
       [ ! -f "$REPO/auto-tabs/$_f" ] || cp "$REPO/auto-tabs/$_f" "$TABS_STAGE/$_f" || late_fail $?
     done
     if [ -f "$APP/mods/auto-tabs/main.js" ]; then

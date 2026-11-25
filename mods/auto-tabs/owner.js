@@ -2,7 +2,7 @@
 // 호스트 호출(run · notify · 저장 · shared)은 전부 생성자에 주입받는다.
 import {
   TOOLS, SIDES, eligible, validClosed, snapshot, recordOf, matches, locate, parseCommand,
-  planRestore, planNormalize, planToggle, planPanel, planOpen, planClose, moveTree, loadState, saveState,
+  planRestore, planNormalize, planToggle, planOpen, planClose, moveTree, loadState, saveState,
 } from "./panels.js";
 
 const ERRORS = {
@@ -44,7 +44,7 @@ export class Owner {
     this.queue.push({ kind: c.op, id: c.id, side: c.side, space: this.space });
   }
 
-  // render · 폴링 타이머에서 부름 → {repoll, sides}
+  // render · 폴링 타이머에서 부름 → {repoll, on}
   tick(root, spaceId, { panels } = {}) {
     this.root = root;
     this.opts = { panels, hideFiles: this.hideFiles };
@@ -72,7 +72,7 @@ export class Owner {
     // 한가할 때만 기록 · 정리: cur 없음 · 큐 비음 · 공간 확정.
     if (!this.cur && !this.queue.length && this.space) {
       const idle = snapshot(root, this.opts, this.closed);
-      const rec = recordOf(idle, this.state.spaces[this.space]);
+      const rec = recordOf(idle);
       if (JSON.stringify(rec) !== JSON.stringify(this.state.spaces[this.space])) {
         this.state.spaces[this.space] = rec;
         this.host.storage.set("panels.v2", saveState(this.state));
@@ -87,7 +87,7 @@ export class Owner {
 
     const fin = snapshot(root, this.opts, this.closed);
     this.publishOwner(fin);
-    return { repoll: Boolean(this.cur || this.queue.length || this.quarantine), sides: this.sidesOf(fin), on: this.onSet(fin) };
+    return { repoll: Boolean(this.cur || this.queue.length || this.quarantine), on: this.onSet(fin) };
   }
 
   enqueueRestore(space, key) {
@@ -139,7 +139,6 @@ export class Owner {
         plan = planNormalize(snap);
         break;
       case "toggle": plan = planToggle(snap, this.closed, job.id); break;
-      case "panel": plan = planPanel(snap, this.closed, job.side, this.state.spaces[job.space ?? this.space]?.[job.side]); break;
       case "open": plan = planOpen(snap, this.closed, job.id); break;
       case "close": plan = planClose(snap, this.closed, job.id); break;
       case "move": {
@@ -176,20 +175,7 @@ export class Owner {
     if (!sameOwner(this.host.getShared(OWNER_KEY), want)) this.host.setShared(OWNER_KEY, want);
   }
 
-  // 위쪽 바 토글용: 쪽마다 {exists, shown, header, any}. any = 누르면 실제로 뭔가 일어남(보이는 중 · 고를 도구 · 사용자 블록).
-  sidesOf(snap) {
-    const out = {};
-    for (const side of Object.keys(SIDES)) {
-      const s = snap[side];
-      out[side] = {
-        exists: Boolean(s?.exists), shown: Boolean(s?.shown), header: Boolean(s?.header),
-        any: Boolean(s?.exists && (s.shown || s.ok.length > 0 || s.foreign.length > 0)),
-      };
-    }
-    return out;
-  }
-
-  // header 없는 쪽의 도구 단추 켜짐 = 보임 && active 이고 닫히지 않은 도구.
+  // 단추 켜짐 = 어느 쪽이든 보임 && active 이고 닫히지 않은 도구.
   onSet(snap) {
     const on = new Set();
     for (const id of TOOLS) {

@@ -149,7 +149,7 @@ sh ~/herdr-option/mods/install-mac.sh --remove-panel-tabs [레이아웃]   # hea
 - 칩은 탭바의 Files / Changes 보임 여부를 따릅니다: `hideFiles` = 이번 실행 뒤 탭바 Files 단추가 숨겨 있나. `--hide-files` / `--show-files` 변환 결과를 같은 패처로 미리 읽고, 변환을 거절하면 지금 상태를 유지합니다. 둘 다 없으면 `auto-tabs` 의 지금 상태이며, `auto-tabs` 가 없으면 옵션에 관계없이 false 입니다. 나중에 `--hide-files` / `--show-files` 만 돌리면 `hideFiles` 는 그대로이니, 바꿨으면 `--panel-tabs` 를 다시 돌립니다.
 - 이미 panel-tabs 의 header 가 있으면 `hideFiles` · `stack` · `height` 만 다를 때 고치고 아니면 그대로 둡니다. **panel-tabs 가 아닌 header 가 이미 있으면** 아무것도 바꾸기 전에 멈춥니다(덮어쓰지 않음).
 - `--panel-tabs` / `--remove-panel-tabs` 실행 전 떠 있는 대상 레이아웃에 `status` 오류가 이미 있으면 메시지를 출력하고 아무것도 바꾸기 전에 거절합니다(파일을 먼저 고친 뒤 재실행). 쓴 뒤 그 레이아웃이 떠 있으면 `herdr-app status` 의 `errors` 에 `layouts/<이름>.json was not applied` 가 생기는지 2초 봅니다. 생기면 사본으로 되돌리고(블록 · header 모두) 그 메시지와 함께 실패합니다. 안 떠 있는 레이아웃은 Herdr 가 파일을 보지 않아 검사할 수 없습니다 — 띄운 뒤 `herdr-app status` 를 봅니다. `status` 를 못 읽으면 «확인 못 함» 만 알립니다.
-- `--remove-panel-tabs` 는 `panel-body` 의 header 가 panel-tabs 것일 때만 뺍니다(사본 + 통째로 바꿔 끼우기). mod 복사 · 패널 열기는 하지 않고(kit 판 `auto-tabs` 는 그대로 두며, 아래 «M2» 의 `panel-bottom` 이 우리 것이면 같이 지웁니다), `mods/panel-tabs` 폴더는 그대로 둡니다(`place: none` 이라 해가 없음 · 지우려면 폴더를 손으로). header 가 없으면 «없음, 바뀐 것 없음» 으로 끝납니다(종료 0). `--panel-tabs` · `--hide-files` · `--show-files` 와는 함께 못 씁니다(종료 2). 탭 줄(header)이 없는 오른쪽 패널은 위쪽 바의 토글 대신 예전처럼 도구 단추(Files · Files+ · Changes · Git)로 열고 닫습니다.
+- `--remove-panel-tabs` 는 `panel-body` 의 header 가 panel-tabs 것일 때만 뺍니다(사본 + 통째로 바꿔 끼우기). mod 복사 · 패널 열기는 하지 않고(kit 판 `auto-tabs` 는 그대로 두며, 아래 «M2» 의 `panel-bottom` 이 우리 것이면 같이 지웁니다), `mods/panel-tabs` 폴더는 그대로 둡니다(`place: none` 이라 해가 없음 · 지우려면 폴더를 손으로). header 가 없으면 «없음, 바뀐 것 없음» 으로 끝납니다(종료 0). `--panel-tabs` · `--hide-files` · `--show-files` 와는 함께 못 씁니다(종료 2).
 - `mods/panel-tabs` 가 심볼릭 링크이거나 그 안에 심볼릭 링크 · 하드링크 파일이 있으면 아무것도 바꾸기 전에 거절합니다. 게시는 `mod.json` 을 먼저, `main.js` 를 마지막에 합니다.
 - 깐 뒤에는 **앱을 한 번 다시 띄우기**를 권합니다(아래 첫 한계).
 
@@ -162,7 +162,7 @@ sh ~/herdr-option/mods/install-mac.sh --remove-panel-tabs [레이아웃]   # hea
 
 M2 가 하는 일:
 
-1. **kit 판 `auto-tabs` 로 바꿔 끼웁니다.** 지금 `mods/auto-tabs/` 를 **폴더째** `.auto-tabs-backup/<시각>-<PID>/` 에 복사한 뒤, 저장소 `mods/auto-tabs/` 의 관리 파일(`mod.json` · `main.js` · `owner.js` · `panels.js` · `names.js` · `config.js` · `win-*.svg` · `panel-right.svg` · `panel-bottom.svg` · `LICENSE-herdr-app`)을 숨긴 폴더에 놓고 `check` 가 통과하면 같은 게시 엔진으로 바꿔 끼웁니다. `gpui-kit.d.ts` · `jsconfig.json` · 사용자 파일 같은 **관리 밖 파일은 그대로** 둡니다. 레이아웃보다 먼저 하므로 `check` 가 떨어지면 `auto-tabs` · 레이아웃 모두 손대지 않습니다. `mods/auto-tabs` 가 링크이거나 안에 링크 · 하드링크가 있으면 거절합니다.
+1. **kit 판 `auto-tabs` 로 바꿔 끼웁니다.** 지금 `mods/auto-tabs/` 를 **폴더째** `.auto-tabs-backup/<시각>-<PID>/` 에 복사한 뒤, 저장소 `mods/auto-tabs/` 의 관리 파일(`mod.json` · `main.js` · `owner.js` · `panels.js` · `names.js` · `config.js` · `win-*.svg` · `LICENSE-herdr-app`)을 숨긴 폴더에 놓고 `check` 가 통과하면 같은 게시 엔진으로 바꿔 끼웁니다. `gpui-kit.d.ts` · `jsconfig.json` · 사용자 파일 같은 **관리 밖 파일은 그대로** 둡니다. 레이아웃보다 먼저 하므로 `check` 가 떨어지면 `auto-tabs` · 레이아웃 모두 손대지 않습니다. `mods/auto-tabs` 가 링크이거나 안에 링크 · 하드링크가 있으면 거절합니다.
    - `config.js`(`export default { names: <bool>, hideFiles: <bool> };`)는 설치기가 만듭니다. `names` = 옛 `main.js` 에 `syncNames` 가 있으면 true(옛 `main.js` 가 이미 kit 판이면 옛 `config.js` 의 값) · `hideFiles` = 옛 Files 숨김 필터(또는 옛 kit `config.js`) 뒤 `--hide-files` / `--show-files` 를 적용한 값. 두 `header` 의 `hideFiles` 도 같은 값입니다.
    - kit 판이 이미 깔려 있으면(`main.js` 첫 줄 `// herdr-kit auto-tabs 2`) 옛 «Files+» 단추 · Files 필터 패처는 건너뜁니다. `--hide-files` / `--show-files` 는 `config.js` 와 두 스택 `header` 의 `hideFiles` 를 함께 고칩니다(`--panel-tabs` 없이도).
 2. **레이아웃에 `panel-bottom` 을 더합니다**(같은 계산 · 한 번 저장 · 사본 하나). `work` 열 안 `status` 바로 앞(없으면 끝):
@@ -173,8 +173,7 @@ M2 가 하는 일:
    - id `panel-bottom` 이 있는데 우리 것이 아니거나 `work` 열이 없으면 **아래 패널만** 건너뛰고 이유를 알립니다(M1 header 는 그대로).
    - 도구 id(`files` · `files-plus` · `changes` · `graph`)가 `panel-body` 와 `panel-bottom` 양쪽에 있으면 아무것도 바꾸기 전에 거절합니다.
    - `files-plus` 블록은 id 가 레이아웃 **어디에도** 없을 때만 `panel-body` 에 더합니다(`panel-bottom` 안에 있으면 그대로).
-3. 위쪽 바(`auto-tabs`)에는 도구 단추 대신 **오른쪽 패널 토글 · 아래 패널 토글** 두 개만 있습니다(아래 토글은 우리 `panel-bottom` 이 있을 때만, 각 토글은 눌렀을 때 할 일이 있을 때만 나타납니다: 그 쪽이 보이거나, 보이거나 다시 열 수 있는 도구가 있거나, 사용자 자신의 블록이 있을 때). 켜짐 = 그 쪽이 보임입니다. 누르면 보이는 쪽은 숨기고, 숨은 쪽은 마지막으로 보던 도구로 보여 줍니다. 도구는 패널의 탭 줄(칩)에서 고릅니다. 키 `auto-tabs.<도구 id>` 는 그대로 그 도구의 토글입니다.
-4. 설치 끝의 패널 열기는 `files-plus` 가 있는 쪽을 엽니다(오른쪽 = `panel-body` 선택 뒤 `panel` 보이기 · 아래 = 우리 `panel-bottom` 선택 뒤 `panel-bottom` 보이기). 우리 것이 아닌 아래 패널은 건드리지 않고, 오른쪽에도 `files-plus` 가 없으면 열기를 건너뜁니다.
+3. 설치 끝의 패널 열기는 `files-plus` 가 있는 쪽을 엽니다(오른쪽 = `panel-body` 선택 뒤 `panel` 보이기 · 아래 = 우리 `panel-bottom` 선택 뒤 `panel-bottom` 보이기). 우리 것이 아닌 아래 패널은 건드리지 않고, 오른쪽에도 `files-plus` 가 없으면 열기를 건너뜁니다.
 
 `--remove-panel-tabs`: 우리 `panel-bottom` 의 도구를 순서대로 `panel-body` 끝으로 옮기고(같은 id 가 양쪽에 있으면 아무것도 바꾸기 전에 거절) `panel-bottom` 을 지운 뒤 `panel-body` header 도 뺍니다. 도구를 옮기지 않은 설치 → 지우기는 레이아웃이 설치 전 사본과 **바이트까지 같습니다**(들여쓰기 · 키 순서 · 끝 줄바꿈 유지). **kit 판 `auto-tabs` 는 그대로 두고**, 옛 판 사본 위치(`.auto-tabs-backup/` 의 가장 새 것, 없으면 «없음»)를 알립니다. 옛 판으로 되돌리려면 그 사본을 `mods/auto-tabs/` 에 손으로 복사합니다.
 
@@ -185,7 +184,7 @@ M2 의 한계:
 - 옮기기가 2초 안에 반영되지 않으면 알림을 띄우고 2초 동안 레이아웃이 조용해질 때까지 다음 옮기기를 미룹니다. Herdr 가 layout.set 반영 여부를 알려 주지 않아(run() 은 null), 그보다 더 늦게 닿은 옮기기는 다음 옮기기가 되돌릴 수 있습니다(시험에서는 3–9 ms 에 반영).
 - 「+」 · 탭 메뉴 팝업은 열 때 한 번만 포커스를 잡습니다(앱 기본 메뉴와 같음). 키가 먹지 않으면 팝업을 한 번 누릅니다.
 - 팝업 키(↑↓ Enter Esc)는 전파를 막지 않습니다. 0.1.18 시험에서 뒤 터미널 · 탭 줄로 새지 않았습니다.
-- 공간을 바꾸면 이전 공간의 대기 toggle/panel/open/close 는 버리고, 옮기기는 그대로 둡니다.
+- 공간을 바꾸면 이전 공간의 대기 toggle/open/close 는 버리고, 옮기기는 그대로 둡니다.
 - `auto-tabs` 를 손으로 옛 판으로 되돌리면 마지막 생존 신호 뒤 60초가 지나 header 가 M1 으로 돌아갑니다(**×** · **「+」** 꺼짐 · 닫힌 목록 무시).
 - **닫기는 «부드러운 닫기»** 입니다. 닫은 도구는 레이아웃에서 빠지지 않고 그 스택에 숨은 채 남습니다. 「+」 로 다시 열면 **같은 자리 · 보던 상태 그대로** 돌아옵니다.
 
@@ -242,7 +241,7 @@ files-plus/          mod 본체 + RECIPE.md
   kinds.js · transfer.js  종류 판별 · 조각 전송
   *.svg                아이콘
 panel-tabs/          mod 본체(패널 탭 줄: main.js · model.js · mod.json)
-auto-tabs/           kit 판 위쪽 바(M2: main.js · owner.js · panels.js · names.js · config.js · win-*.svg · panel-*.svg · mod.json)
+auto-tabs/           kit 판 위쪽 바(M2: main.js · owner.js · panels.js · names.js · config.js · win-*.svg · mod.json)
 docs/                popups-design.md(팝업 개편 설계)
 tests/               node 시험(files-plus · state · fsops) · 격리 check 스크립트
 install-mac.sh       Mac 에 깔고 화면(오른쪽 패널 · 탭바 «Files+» · 선택 --panel-tabs)에 띄운다
